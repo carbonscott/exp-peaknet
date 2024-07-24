@@ -696,7 +696,19 @@ if monitors_dynamics:
 #  HELPER
 # ----------------------------------------------------------------------- #
 @torch.no_grad()
-def estimate_loss(dataloader, model, criterion, autocast_context, max_iter = None, desc = '', device = 'cpu', dummy_input_shape = None, **kwargs):
+def estimate_loss(
+    dataloader,
+    model,
+    criterion,
+    autocast_context,
+    max_iter              = None,
+    desc                  = '',
+    device                = 'cpu',
+    dummy_input_shape     = None,
+    mixed_precision_dtype = torch.float32,
+    transforms            = None,
+    **kwargs
+):
     ''' Estimate loss.
         The dataloader should be wrapped with Dataloader class or
         DistributedSampler class, best with shuffle being true.  The shuffle
@@ -742,18 +754,33 @@ def estimate_loss(dataloader, model, criterion, autocast_context, max_iter = Non
         # FIXME: Better data cleaning will eliminate None batch
         if batch_data is None:
             logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
-            batch_input, batch_target = batch_data
-            batch_input  = torch.zeros(dummy_input_shape, device = device)
-            batch_target = torch.zeros(dummy_input_shape, dtype = torch.bool, device = device)
+            batch_input  = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
+            batch_target = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
             none_mask[enum_idx] = 1
+            batch_data = (batch_input, batch_target)
 
-        batch_input, batch_target = batch_data
-        batch_input  = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
-        batch_target = batch_target.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+        # -- Optional batch data transforms on GPUs to improve mfu
+        # Concat data to perform the identical transform on input and target
+        batch_data = torch.cat(batch_data, dim = 0)    # (2*B, C, H, W)
+        batch_data = batch_data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+
+        # Optional transform
+        if transforms is not None:
+            for enum_idx, trans in enumerate(transforms):
+                batch_data = trans(batch_data)
+
+        # Unpack vars
+        current_batch_size = batch_data.size(0) // 2
+        batch_input  = batch_data[                  :current_batch_size]
+        batch_target = batch_data[current_batch_size:                  ]
+
+        # Binarize the label
+        batch_target = batch_target > 0
 
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
 
+        # -- Forward pass
         with autocast_context:
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Forwarding")
@@ -1110,7 +1137,7 @@ try:
                 if batch_data is None:
                     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
                     batch_input  = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
-                    batch_target = torch.zeros(batch_input_shape, dtype = torch.bool)
+                    batch_target = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
                     batch_data = (batch_input, batch_target)
 
                 # ----- Optional batch data transforms on GPUs to improve mfu
