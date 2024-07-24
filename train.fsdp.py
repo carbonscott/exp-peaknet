@@ -788,6 +788,20 @@ def estimate_loss(
 
             batch_output = model(batch_input)
 
+            # !!!!!!!!!!!!!!!
+            # !! Data dump !!
+            # !!!!!!!!!!!!!!!
+            if dist_rank == 0 and data_dump_on:
+                mini_batch = enum_idx
+
+                data_dump = {
+                    "batch_data"   : batch_data,
+                    "batch_input"  : batch_input,
+                    "batch_output" : batch_output,
+                }
+                path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.fwd.pt')
+                torch.save(data_dump, path_data_dump)
+
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
             loss = criterion(batch_output, batch_target)
@@ -1141,7 +1155,6 @@ try:
                     batch_target = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
                     batch_data = (batch_input, batch_target)
 
-                # ----- Optional batch data transforms on GPUs to improve mfu
                 # Concat data to perform the identical transform on input and target
                 batch_data = torch.cat(batch_data, dim = 0)    # (2*B, C, H, W)
                 batch_data = batch_data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
@@ -1160,7 +1173,6 @@ try:
                 if transforms is not None:
                     batch_target = batch_target > 0
 
-                # ----- Conditional gradient accumulation
                 # Specify the effective grad accum steps
                 real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
 
@@ -1191,7 +1203,6 @@ try:
                 # Increment the grad nosync counter
                 grad_nosync_counter += 1
 
-                # ----- Wrap up one iteration
                 # Conditional parameter updates when grad sync is required
                 if is_grad_sync_required:
                     # ---- Update neural network parameters
@@ -1375,10 +1386,12 @@ try:
                                 model,
                                 criterion,
                                 autocast_context,
-                                max_iter          = max_eval_iter,
-                                desc              = '(training set)',
-                                device            = device,
-                                dummy_input_shape = batch_input_shape,
+                                max_iter              = max_eval_iter,
+                                desc                  = '(training set)',
+                                device                = device,
+                                dummy_input_shape     = batch_input_shape,
+                                mixed_precision_dtype = mixed_precision_dtype,
+                                transforms            = transforms,
                                 **data_dump_timestamp,
                             )
                             num_eval_retry += 1
@@ -1426,10 +1439,12 @@ try:
                                 model,
                                 criterion,
                                 autocast_context,
-                                max_iter          = max_eval_iter,
-                                desc              = '(validation set)',
-                                device            = device,
-                                dummy_input_shape = batch_input_shape,
+                                max_iter              = max_eval_iter,
+                                desc                  = '(validation set)',
+                                device                = device,
+                                dummy_input_shape     = batch_input_shape,
+                                mixed_precision_dtype = mixed_precision_dtype,
+                                transforms            = transforms,
                                 **data_dump_timestamp,
                             )
                             num_eval_retry += 1
