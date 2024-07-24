@@ -1113,11 +1113,13 @@ try:
                     batch_data = (batch_input, batch_target)
 
                 batch_input, batch_target = batch_data  # (B, C, H, W)
-                batch_input  = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
-                batch_target = batch_target.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+                data = torch.cat([batch_input, batch_target], dim = 0)    # (2*B, C, H, W)
+
+                ## batch_input  = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+                ## batch_target = batch_target.to(device, non_blocking = True, dtype = mixed_precision_dtype)
 
                 # Perform transform on gpu
-                data = torch.cat([batch_input, batch_target], dim = 0)    # (2*B, C, H, W)
+                data = data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
                 for enum_idx, trans in enumerate(transforms):
                     data = trans(data)
 
