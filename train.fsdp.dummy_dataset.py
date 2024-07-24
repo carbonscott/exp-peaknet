@@ -973,6 +973,7 @@ def estimate_mfu_per_iteration(num_flops_per_token, total_num_tokens_per_iterati
 
     return mfu
 
+
 # ----------------------------------------------------------------------- #
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
@@ -1108,28 +1109,29 @@ try:
                 # FIXME: Better data cleaning will eliminate None batch
                 if batch_data is None:
                     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
-                    batch_input  = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype, device = device)
-                    batch_target = torch.zeros(batch_input_shape, dtype = torch.bool, device = device)
+                    batch_input  = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
+                    batch_target = torch.zeros(batch_input_shape, dtype = torch.bool)
                     batch_data = (batch_input, batch_target)
 
-                batch_input, batch_target = batch_data  # (B, C, H, W)
-                data = torch.cat([batch_input, batch_target], dim = 0)    # (2*B, C, H, W)
+                # ----- Optional batch data transforms on GPUs to improve mfu
+                # Concat data to perform the identical transform on input and target
+                batch_data = torch.cat(batch_data, dim = 0)    # (2*B, C, H, W)
+                batch_data = batch_data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
 
-                ## batch_input  = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
-                ## batch_target = batch_target.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+                # Optional transform
+                if transforms is not None:
+                    for enum_idx, trans in enumerate(transforms):
+                        batch_data = trans(batch_data)
 
-                # Perform transform on gpu
-                data = data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
-                for enum_idx, trans in enumerate(transforms):
-                    data = trans(data)
+                # Unpack vars
+                current_batch_size = batch_data.size(0) // 2
+                batch_input  = batch_data[                  :current_batch_size]
+                batch_target = batch_data[current_batch_size:                  ]
 
-                B = batch_input.size(0)
-                batch_input  = data[0:B]  # (1, C, H, W)
-                batch_target = data[B: ]  # (1, C, H, W)
-
-                # Binarize the label...
+                # Binarize the label
                 batch_target = batch_target > 0
 
+                # ----- Conditional gradient accumulation
                 # Specify the effective grad accum steps
                 real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
 
@@ -1160,6 +1162,7 @@ try:
                 # Increment the grad nosync counter
                 grad_nosync_counter += 1
 
+                # ----- Wrap up one iteration
                 # Conditional parameter updates when grad sync is required
                 if is_grad_sync_required:
                     # ---- Update neural network parameters
