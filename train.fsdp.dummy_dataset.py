@@ -447,7 +447,6 @@ dataset_train_config = DistributedSegmentedDummyImageDataConfig(
     total_size      = total_size,
     dist_rank       = dist_rank,
     dist_world_size = dist_world_size,
-    ## transforms      = transforms,
     transforms      = None,
     dtype           = None,
 )
@@ -459,7 +458,6 @@ dataset_eval_train = DistributedSegmentedDummyImageData(dataset_train_config)
 
 # --- For val loss
 dataset_eval_val_config = DistributedSegmentedDummyImageDataConfig(
-    ## C, H, W, seg_size, total_size, dist_rank, dist_world_size, transforms, None,
     C, H, W, seg_size, total_size, dist_rank, dist_world_size, None, None,
 )
 dataset_eval_val = DistributedSegmentedDummyImageData(dataset_eval_val_config)
