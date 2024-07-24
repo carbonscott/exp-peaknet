@@ -447,7 +447,8 @@ dataset_train_config = DistributedSegmentedDummyImageDataConfig(
     total_size      = total_size,
     dist_rank       = dist_rank,
     dist_world_size = dist_world_size,
-    transforms      = transforms,
+    ## transforms      = transforms,
+    transforms      = None,
     dtype           = None,
 )
 dataset_train = DistributedSegmentedDummyImageData(dataset_train_config)
@@ -458,7 +459,8 @@ dataset_eval_train = DistributedSegmentedDummyImageData(dataset_train_config)
 
 # --- For val loss
 dataset_eval_val_config = DistributedSegmentedDummyImageDataConfig(
-    C, H, W, seg_size, total_size, dist_rank, dist_world_size, transforms, None,
+    ## C, H, W, seg_size, total_size, dist_rank, dist_world_size, transforms, None,
+    C, H, W, seg_size, total_size, dist_rank, dist_world_size, None, None,
 )
 dataset_eval_val = DistributedSegmentedDummyImageData(dataset_eval_val_config)
 
@@ -1113,6 +1115,18 @@ try:
                 batch_input, batch_target = batch_data  # (B, C, H, W)
                 batch_input  = batch_input.to(device, non_blocking = True, dtype = mixed_precision_dtype)
                 batch_target = batch_target.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+
+                # Perform transform on gpu
+                data = torch.cat([batch_input, batch_target], dim = 0)    # (2*B, C, H, W)
+                for enum_idx, trans in enumerate(transforms):
+                    data = trans(data)
+
+                B = batch_input.size(0)
+                batch_input  = data[0:B]  # (1, C, H, W)
+                batch_target = data[B: ]  # (1, C, H, W)
+
+                # Binarize the label...
+                batch_target = batch_target > 0
 
                 # Specify the effective grad accum steps
                 real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
