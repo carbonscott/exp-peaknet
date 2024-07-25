@@ -781,7 +781,7 @@ def estimate_loss(
 
         # Optinally binarize the label
         if transforms is not None:
-            batch_target = batch_target > 0
+            batch_target = batch_target > 0.5
 
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
@@ -800,8 +800,8 @@ def estimate_loss(
                 mini_batch = enum_idx
 
                 data_dump = {
-                    "batch_data"   : batch_data,
                     "batch_input"  : batch_input,
+                    "batch_target" : batch_target,
                     "batch_output" : batch_output,
                 }
                 path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.fwd.pt')
@@ -819,7 +819,8 @@ def estimate_loss(
             mini_batch = enum_idx
 
             data_dump = {
-                "batch_data"   : batch_data,
+                "batch_input"  : batch_input,
+                "batch_target" : batch_target,
                 "batch_output" : batch_output,
                 "loss"         : loss,
             }
@@ -1176,7 +1177,7 @@ try:
 
                 # Optinally binarize the label
                 if transforms is not None:
-                    batch_target = batch_target > 0
+                    batch_target = batch_target > 0.5
 
                 # Specify the effective grad accum steps
                 real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
