@@ -408,11 +408,16 @@ class NoTransform:
     def __call__(self, x, **kwargs):
         return x
 
+pre_transforms = (
+    Pad(H_pad, W_pad) if uses_pad else NoTransform(),
+    DownscaleLocalMean(factors = downscale_factors) if uses_downscale else NoTransform(),
+)
+
 transforms = (
     ## Norm(detector_norm_params),
 
-    Pad(H_pad, W_pad)                               if uses_pad           else NoTransform(),
-    DownscaleLocalMean(factors = downscale_factors) if uses_downscale     else NoTransform(),
+    ## Pad(H_pad, W_pad)                               if uses_pad           else NoTransform(),
+    ## DownscaleLocalMean(factors = downscale_factors) if uses_downscale     else NoTransform(),
     RandomPatch(
         num_patch    = num_patch,
         H_patch      = size_patch,
@@ -436,7 +441,7 @@ transforms = (
 dataset_train_config = SegmentedPeakNetDatasetConfig(
     path_csv        = path_dataset_train,
     seg_size        = seg_size,
-    transforms      = None,    # Delay the transform
+    transforms      = pre_transforms,
     buffer_size     = 1,
     dist_rank       = dist_rank,
     dist_world_size = dist_world_size,
@@ -454,7 +459,7 @@ dataset_eval_train = SegmentedPeakNetDataset(dataset_train_config)
 dataset_eval_val_config = SegmentedPeakNetDatasetConfig(
     path_csv        = path_dataset_eval,
     seg_size        = seg_size,
-    transforms      = None,    # Delay the transform
+    transforms      = pre_transforms,
     buffer_size     = 1,
     dist_rank       = dist_rank,
     dist_world_size = dist_world_size,
