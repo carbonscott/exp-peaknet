@@ -425,13 +425,13 @@ transforms = (
         var_H_patch  = var_size_patch,
         var_W_patch  = var_size_patch,
         returns_mask = False,
-    )                                               if uses_random_patch  else NoTransform(),
-    RandomRotate(angle_max)                         if uses_random_rotate else NoTransform(),
+    ) if uses_random_patch  else NoTransform(),
+    RandomRotate(angle_max) if uses_random_rotate else NoTransform(),
     RandomShift(
         frac_y_shift_max = frac_shift_max,
         frac_x_shift_max = frac_shift_max,
-    )                                               if uses_random_shift  else NoTransform(),
-    InstanceNorm()                                  if uses_instance_norm else NoTransform(),
+    ) if uses_random_shift  else NoTransform(),
+    InstanceNorm() if uses_instance_norm else NoTransform(),
 
     ## Patchify(patch_size, stride),
     ## BatchSampler(sampling_fraction),
@@ -1359,7 +1359,7 @@ try:
                         num_eval_retry = 0
                         while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_train.reset()
-                            high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
+                            high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                             dataset_eval_train.set_start_idx(rand_start_idx)
 
@@ -1413,7 +1413,7 @@ try:
                         num_eval_retry = 0
                         while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_val.reset()
-                            high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
+                            high_seg_idx = max(dataset_eval_val.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                             dataset_eval_val.set_start_idx(rand_start_idx)
 
