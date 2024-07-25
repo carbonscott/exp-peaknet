@@ -779,7 +779,7 @@ def estimate_loss(
         batch_input  = batch_data[                  :current_batch_size]
         batch_target = batch_data[current_batch_size:                  ]
 
-        # Optinally binarize the label
+        # Optionally binarize the label
         if transforms is not None:
             batch_target = batch_target > 0.5
 
@@ -1175,7 +1175,7 @@ try:
                 batch_input  = batch_data[                  :current_batch_size]
                 batch_target = batch_data[current_batch_size:                  ]
 
-                # Optinally binarize the label
+                # Optionally binarize the label
                 if transforms is not None:
                     batch_target = batch_target > 0.5
 
