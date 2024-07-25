@@ -408,25 +408,30 @@ class NoTransform:
     def __call__(self, x, **kwargs):
         return x
 
+pre_transforms = (
+    Pad(H_pad, W_pad) if uses_pad else NoTransform(),
+    DownscaleLocalMean(factors = downscale_factors) if uses_downscale else NoTransform(),
+)
+
 transforms = (
     ## Norm(detector_norm_params),
 
-    Pad(H_pad, W_pad)                               if uses_pad           else NoTransform(),
-    DownscaleLocalMean(factors = downscale_factors) if uses_downscale     else NoTransform(),
+    ## Pad(H_pad, W_pad)                               if uses_pad           else NoTransform(),
+    ## DownscaleLocalMean(factors = downscale_factors) if uses_downscale     else NoTransform(),
     RandomPatch(
         num_patch    = num_patch,
         H_patch      = size_patch,
         W_patch      = size_patch,
         var_H_patch  = var_size_patch,
         var_W_patch  = var_size_patch,
-        returns_mask = False
-    )                                               if uses_random_patch  else NoTransform(),
-    RandomRotate(angle_max)                         if uses_random_rotate else NoTransform(),
+        returns_mask = False,
+    ) if uses_random_patch  else NoTransform(),
+    RandomRotate(angle_max) if uses_random_rotate else NoTransform(),
     RandomShift(
         frac_y_shift_max = frac_shift_max,
-        frac_x_shift_max = frac_shift_max
-    )                                               if uses_random_shift  else NoTransform(),
-    InstanceNorm()                                  if uses_instance_norm else NoTransform(),
+        frac_x_shift_max = frac_shift_max,
+    ) if uses_random_shift  else NoTransform(),
+    InstanceNorm() if uses_instance_norm else NoTransform(),
 
     ## Patchify(patch_size, stride),
     ## BatchSampler(sampling_fraction),
@@ -772,8 +777,9 @@ def estimate_loss(
         batch_input  = batch_data[                  :current_batch_size]
         batch_target = batch_data[current_batch_size:                  ]
 
-        # Binarize the label
-        batch_target = batch_target > 0
+        # Optionally binarize the label
+        if transforms is not None:
+            batch_target = batch_target > 0.5
 
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
@@ -784,6 +790,20 @@ def estimate_loss(
                 logger.debug(f"[RANK {dist_rank}] EVAL - Forwarding")
 
             batch_output = model(batch_input)
+
+            # !!!!!!!!!!!!!!!
+            # !! Data dump !!
+            # !!!!!!!!!!!!!!!
+            if dist_rank == 0 and data_dump_on:
+                mini_batch = enum_idx
+
+                data_dump = {
+                    "batch_input"  : batch_input,
+                    "batch_target" : batch_target,
+                    "batch_output" : batch_output,
+                }
+                path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.fwd.pt')
+                torch.save(data_dump, path_data_dump)
 
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
@@ -797,7 +817,8 @@ def estimate_loss(
             mini_batch = enum_idx
 
             data_dump = {
-                "batch_data"   : batch_data,
+                "batch_input"  : batch_input,
+                "batch_target" : batch_target,
                 "batch_output" : batch_output,
                 "loss"         : loss,
             }
@@ -1153,8 +1174,9 @@ try:
                 batch_input  = batch_data[                  :current_batch_size]
                 batch_target = batch_data[current_batch_size:                  ]
 
-                # Binarize the label
-                batch_target = batch_target > 0
+                # Optionally binarize the label
+                if transforms is not None:
+                    batch_target = batch_target > 0.5
 
                 # ----- Conditional gradient accumulation
                 # Specify the effective grad accum steps
@@ -1339,7 +1361,7 @@ try:
                         num_eval_retry = 0
                         while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_train.reset()
-                            high_seg_idx = dataset_eval_train.total_size - seg_size * dist_world_size
+                            high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                             dataset_eval_train.set_start_idx(rand_start_idx)
 
@@ -1371,10 +1393,12 @@ try:
                                 model,
                                 criterion,
                                 autocast_context,
-                                max_iter          = max_eval_iter,
-                                desc              = '(training set)',
-                                device            = device,
-                                dummy_input_shape = batch_input_shape,
+                                max_iter              = max_eval_iter,
+                                desc                  = '(training set)',
+                                device                = device,
+                                dummy_input_shape     = batch_input_shape,
+                                mixed_precision_dtype = mixed_precision_dtype,
+                                transforms            = transforms,
                                 **data_dump_timestamp,
                             )
                             num_eval_retry += 1
@@ -1391,7 +1415,7 @@ try:
                         num_eval_retry = 0
                         while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_val.reset()
-                            high_seg_idx = dataset_eval_val.total_size - seg_size * dist_world_size
+                            high_seg_idx = max(dataset_eval_val.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
                             dataset_eval_val.set_start_idx(rand_start_idx)
 
@@ -1422,10 +1446,12 @@ try:
                                 model,
                                 criterion,
                                 autocast_context,
-                                max_iter          = max_eval_iter,
-                                desc              = '(validation set)',
-                                device            = device,
-                                dummy_input_shape = batch_input_shape,
+                                max_iter              = max_eval_iter,
+                                desc                  = '(validation set)',
+                                device                = device,
+                                dummy_input_shape     = batch_input_shape,
+                                mixed_precision_dtype = mixed_precision_dtype,
+                                transforms            = transforms,
                                 **data_dump_timestamp,
                             )
                             num_eval_retry += 1
