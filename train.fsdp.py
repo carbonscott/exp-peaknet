@@ -22,7 +22,7 @@ from datetime   import timedelta
 
 # -- peaknet specific imports
 # --- Dataset
-from peaknet.datasets.segmented_safetensor_dataset import (
+from peaknet.datasets.segmented_zarr_dataset import (
     SegmentedPeakNetDatasetConfig,
     SegmentedPeakNetDataset,
 )
