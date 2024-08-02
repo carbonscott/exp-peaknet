@@ -2,7 +2,7 @@
 
 RUNS_NSYS=0
 
-JOB=safetensors0.0
+JOB=zarr0.0
 BATCH_SIZE=20
 USES_PAD=true
 USES_DOWNSCALE=true
@@ -21,6 +21,8 @@ train_config.checkpoint.prefix=$JOB \
 train_config.checkpoint.state_dict_type=full \
 train_config.checkpoint.preempt_chkpt_saving_iterations=null \
 train_config.checkpoint.chkpt_saving_iterations=1 \
+train_config.dataset.path_train=train.csv \
+train_config.dataset.path_eval=eval.csv \
 train_config.dataset.num_workers=2 \
 train_config.dataset.prefetch_factor=10 \
 train_config.dataset.pin_memory=true \
