@@ -1,13 +1,15 @@
 #!/bin/bash
 
 RUNS_NSYS=0
+NUM_MPI_TASKS=4
 
 JOB=exp0.1
-INPUT_H=512
-INPUT_W=512
-BATCH_SIZE=76
-USES_PAD=false
-USES_DOWNSCALE=false
+INPUT_H=1667
+INPUT_W=1667
+BATCH_SIZE=20
+USES_PAD=true
+USES_POLAR_CENTER_CROP=true
+USES_BATCH_SAMPLER=false
 USES_RANDOM_PATCH=true
 USES_RANDOM_ROTATE=true
 USES_RANDOM_SHIFT=true
@@ -23,9 +25,9 @@ sbatch_config.trainer=train.fsdp.dummy_dataset.py \
 exp_mfu.checkpoint.prefix=$JOB \
 exp_mfu.checkpoint.state_dict_type=full \
 exp_mfu.checkpoint.preempt_chkpt_saving_iterations=null \
-exp_mfu.checkpoint.chkpt_saving_iterations=1 \
-exp_mfu.dataset.num_workers=4 \
-exp_mfu.dataset.prefetch_factor=20 \
+exp_mfu.checkpoint.chkpt_saving_iterations=null \
+exp_mfu.dataset.num_workers=2 \
+exp_mfu.dataset.prefetch_factor=10 \
 exp_mfu.dataset.pin_memory=true \
 exp_mfu.dataset.seg_size=$SEG_SIZE \
 exp_mfu.loss.grad_accum_steps=10 \
@@ -34,7 +36,8 @@ exp_mfu.dataset.input.H=$INPUT_H \
 exp_mfu.dataset.input.W=$INPUT_W \
 exp_mfu.dataset.input.total_size=$TOTAL_SIZE \
 exp_mfu.dataset.transforms.set.pad=$USES_PAD \
-exp_mfu.dataset.transforms.set.downscale=$USES_DOWNSCALE \
+exp_mfu.dataset.transforms.set.polar_center_crop=$USES_POLAR_CENTER_CROP \
+exp_mfu.dataset.transforms.set.batch_sampler=$USES_BATCH_SAMPLER \
 exp_mfu.dataset.transforms.set.random_patch=$USES_RANDOM_PATCH \
 exp_mfu.dataset.transforms.set.random_rotate=$USES_RANDOM_ROTATE \
 exp_mfu.dataset.transforms.set.random_shift=$USES_RANDOM_SHIFT \
@@ -50,7 +53,7 @@ exp_mfu.logging.prefix=$JOB \
 exp_mfu.dist.dtype=bfloat16 \
 exp_mfu.model.backbone.hf_config.image_size=$INPUT_H
 
-base_command="mpirun -n 4 python train.fsdp.dummy_dataset.py experiments/yaml/$JOB.yaml"
+base_command="mpirun -n $NUM_MPI_TASKS python train.fsdp.dummy_dataset.py experiments/yaml/$JOB.yaml"
 final_command="OMP_NUM_THREADS=1 "
 
 if [ $RUNS_NSYS -eq 1 ]; then

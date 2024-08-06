@@ -414,11 +414,11 @@ class NoTransform:
     def __call__(self, x, **kwargs):
         return x
 
+merges_batch_patch_dims = uses_polar_center_crop
 pre_transforms = (
     Pad(H_pad, W_pad) if uses_pad else NoTransform(),
 )
 
-merges_batch_patch_dims = uses_polar_center_crop
 transforms = (
     PolarCenterCrop(
         Hv       = Hv,
