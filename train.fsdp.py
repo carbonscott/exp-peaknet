@@ -190,7 +190,6 @@ uses_pad               = set_transforms.get("pad")
 uses_random_patch      = set_transforms.get("random_patch")
 uses_random_rotate     = set_transforms.get("random_rotate")
 uses_random_shift      = set_transforms.get("random_shift")
-uses_instance_norm     = set_transforms.get("instance_norm")
 uses_polar_center_crop = set_transforms.get("polar_center_crop")
 uses_batch_sampler     = set_transforms.get("batch_sampler")
 
@@ -441,7 +440,6 @@ transforms = (
         frac_y_shift_max = frac_shift_max,
         frac_x_shift_max = frac_shift_max,
     ) if uses_random_shift  else NoTransform(),
-    InstanceNorm() if uses_instance_norm else NoTransform(),
 )
 
 # -- Set up training set

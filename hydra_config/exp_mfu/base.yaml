@@ -35,8 +35,6 @@ dataset:
     angle_max: 360
     frac_shift_max: 0.1
     var_size_patch: 0.2
-    patch_size: 224
-    stride: 224
     sampling_fraction: null
     set:
       pad          : False

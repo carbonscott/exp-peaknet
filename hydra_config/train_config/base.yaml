@@ -25,20 +25,17 @@ dataset:
     Wv: 256
     sigma: 0.333
     num_crop: 8
-    num_patch: 250
+    num_patch: 100
     size_patch: 20
     angle_max: 360
     frac_shift_max: 0.1
     var_size_patch: 0.2
-    patch_size: 224
-    stride: 224
     sampling_fraction: null
     set:
       pad              : False
       random_patch     : False
       random_rotate    : False
       random_shift     : False
-      instance_norm    : False
       polar_center_crop: False
       batch_sampler    : False
 dist:
