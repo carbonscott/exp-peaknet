@@ -324,7 +324,7 @@ auto_wrap_policy = partial(
         ## ConvNextV2Embeddings,
         ConvNextV2Stage,
         ## ConvNextV2Layer, # Need to experiment with it
-        ## BiFPN,
+        BiFPNBlock,
         ## SegLateralLayer,
     },
 )
@@ -536,6 +536,7 @@ peaknet_config = PeakNetConfig(
 
 # -- Config the model
 model = PeakNet(peaknet_config)
+model.init_weights()
 if not uses_dist: model.to(device)
 
 # !! Make all params trainable, a workaround for pytorch 2.0.1
@@ -623,7 +624,7 @@ grad_sync_context = lambda enables_sync: nullcontext() if enables_sync or not us
 ##     checkpoint_wrapper_fn = non_reentrant_wrapper,
 ##     check_fn              = enable_activation_checkpointing(wrap_layer_cls, wrap_min_num_params),
 ## )
-ac_layer = ConvNextV2Stage
+ac_layer = (ConvNextV2Stage, BiFPNBlock)
 if ac_layer is not None:
     check_fn = lambda submodule: isinstance(submodule, ac_layer)
     apply_activation_checkpointing(
