@@ -1,7 +1,7 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-NUM_MPI_TASKS=8
+NUM_MPI_TASKS=4
 
 JOB=huge-0.0
 FOCAL_ALPHA="[0.25, 0.75]"
@@ -13,14 +13,15 @@ NUM_WORKERS=2
 USES_PAD=true
 USES_POLAR_CENTER_CROP=false
 USES_BATCH_SAMPLER=false
-USES_RANDOM_PATCH=true
-USES_RANDOM_ROTATE=true
-USES_RANDOM_SHIFT=true
-PATH_CHKPT_PREV=null
+USES_RANDOM_PATCH=false
+USES_RANDOM_ROTATE=false
+USES_RANDOM_SHIFT=false
+PATH_CHKPT_PREV="experiments/chkpts/huge-0.0.2024_0814_2055_46.preempt"
 PREEEMPT_CHKPT_SAVING_ITERATIONS=20
 CHKPT_SAVING_ITERATIONS=20
-GRAD_ACCUM_STEPS=60
-WARMUP=100
+GRAD_ACCUM_STEPS=20
+WARMUP=20
+SHARDING_STAGE="zero3"
 
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
@@ -56,8 +57,9 @@ train_config.dataset.transforms.W_pad=$W_PAD \
 train_config.model.backbone.hf_config.image_size=$H_PAD \
 "train_config.model.backbone.hf_config.hidden_sizes=[352, 704, 1408, 2816]" \
 "train_config.model.backbone.hf_config.depths=[3, 3, 27, 3]" \
-"train_config.model.bifpn.block.num_features=1024" \
+"train_config.model.bifpn.block.num_features=512" \
 "train_config.model.bifpn.num_blocks=4" \
+train_config.model.seg_head.uses_learned_upsample=true \
 train_config.loss.grad_accum_steps=$GRAD_ACCUM_STEPS \
 "train_config.loss.focal.alpha=$FOCAL_ALPHA" \
 train_config.loss.focal.gamma=$FOCAL_GAMMA \
@@ -66,6 +68,7 @@ train_config.optim.fused=false \
 train_config.misc.monitors_dynamics=false \
 train_config.misc.compiles_model=false \
 train_config.misc.max_eval_iter=40 \
+"train_config.misc.sharding_stage=$SHARDING_STAGE" \
 train_config.misc.data_dump_on=false \
 train_config.lr_scheduler.warmup_iterations=$WARMUP \
 train_config.lr_scheduler.total_iterations=3200 \
