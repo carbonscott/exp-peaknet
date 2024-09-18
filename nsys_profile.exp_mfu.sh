@@ -30,6 +30,7 @@ auto_submit=false \
 sbatch_config.trainer=train.fsdp.dummy_dataset.py \
 exp_mfu.checkpoint.prefix=$JOB \
 exp_mfu.checkpoint.state_dict_type=full \
+exp_mfu.checkpoint.preempt_metadata_path="preempt/${JOB}.dat" \
 exp_mfu.checkpoint.preempt_chkpt_saving_iterations=null \
 exp_mfu.checkpoint.chkpt_saving_iterations=null \
 exp_mfu.dataset.num_workers=$NUM_WORKERS \
