@@ -1,9 +1,9 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-NUM_MPI_TASKS=10
+NUM_MPI_TASKS=4
 
-JOB=distill-3.0
+JOB=distill-5.1
 BATCH_SIZE=4
 H_PAD=1920
 W_PAD=1920
@@ -21,7 +21,10 @@ GRAD_ACCUM_STEPS=10
 WARMUP=20
 SHARDING_STAGE="zero3"
 
+# [KNOWLEDGE DISTILLATION]
 TEMPERATURE=2.0
+LAM_MSE=0.0
+LAM_KL_DIV=1.0
 
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
@@ -62,6 +65,8 @@ distill_config.model.backbone.hf_config.image_size=$H_PAD \
 distill_config.model.seg_head.uses_learned_upsample=true \
 distill_config.loss.grad_accum_steps=$GRAD_ACCUM_STEPS \
 distill_config.loss.temperature=$TEMPERATURE \
+distill_config.loss.temperature=$LAM_MSE \
+distill_config.loss.temperature=$LAM_KL_DIV \
 distill_config.optim.lr=0.0003 \
 distill_config.optim.fused=false \
 distill_config.misc.monitors_dynamics=false \

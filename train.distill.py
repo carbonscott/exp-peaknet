@@ -210,6 +210,8 @@ seghead_num_classes       = seghead_params.get("num_classes")
 loss_config      = config.get("loss")
 grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 temperature      = loss_config.get("temperature", 1.0)
+lam_mse          = loss_config.get("lam_mse", 0.5)
+lam_kl_div       = loss_config.get("lam_kl_div", 0.5)
 
 # -- Optimizer
 optim_config = config.get("optim")
@@ -636,24 +638,33 @@ if dist_rank == 0:
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring criterion...')
-## criterion = nn.MSELoss()
 class KnowledgeDistillationLoss(nn.Module):
-    def __init__(self, temperature=1.0):
+    def __init__(self, temperature=2.0, lam_mse=0.5, lam_kl_div=0.5):
         super().__init__()
         self.temperature = temperature
+        self.mse         = nn.MSELoss()
         self.kl_div      = nn.KLDivLoss(reduction="batchmean")
+        self.lam_mse     = lam_mse
+        self.lam_kl_div  = lam_kl_div
 
     def forward(self, student_logits, teacher_logits):
+        # -- MSE loss on logits
+        mse_loss = self.mse(student_logits, teacher_logits)
+
+        # -- KL div loss
         T = self.temperature
+        student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
+        teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
 
-        student_probs = F.log_softmax(student_logits / T, dim=1)
-        teacher_probs = F.softmax(teacher_logits / T, dim=1)
+        # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
+        kl_div_loss = self.kl_div(student_log_probs, teacher_probs) * (T * T)
 
-        loss = self.kl_div(student_probs, teacher_probs) * (T * T)  # Following https://arxiv.org/pdf/1503.02531
+        # -- Total
+        loss = self.lam_mse * mse_loss + self.lam_kl_div * kl_div_loss
 
         return loss
 
-criterion = KnowledgeDistillationLoss(temperature=temperature)
+criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl_div=lam_kl_div)
 
 # ----------------------------------------------------------------------- #
 #  OPTIMIZER AND SCHEDULER
