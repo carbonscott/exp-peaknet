@@ -1,7 +1,7 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-NUM_MPI_TASKS=4
+NUM_MPI_TASKS=10
 
 JOB=distill-5.1
 BATCH_SIZE=4
@@ -65,8 +65,8 @@ distill_config.model.backbone.hf_config.image_size=$H_PAD \
 distill_config.model.seg_head.uses_learned_upsample=true \
 distill_config.loss.grad_accum_steps=$GRAD_ACCUM_STEPS \
 distill_config.loss.temperature=$TEMPERATURE \
-distill_config.loss.temperature=$LAM_MSE \
-distill_config.loss.temperature=$LAM_KL_DIV \
+distill_config.loss.lam_mse=$LAM_MSE \
+distill_config.loss.lam_kl_div=$LAM_KL_DIV \
 distill_config.optim.lr=0.0003 \
 distill_config.optim.fused=false \
 distill_config.misc.monitors_dynamics=false \

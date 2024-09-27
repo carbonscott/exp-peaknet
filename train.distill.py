@@ -648,19 +648,23 @@ class KnowledgeDistillationLoss(nn.Module):
         self.lam_kl_div  = lam_kl_div
 
     def forward(self, student_logits, teacher_logits):
+        loss = 0.0
+
         # -- MSE loss on logits
-        mse_loss = self.mse(student_logits, teacher_logits)
+        if self.lam_mse > 0:
+            mse_loss = self.mse(student_logits, teacher_logits)
+            loss += self.lam_mse * mse_loss
 
         # -- KL div loss
-        T = self.temperature
-        student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
-        teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
+        if self.lam_kl_div > 0:
+            T = self.temperature
+            student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
+            teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
 
-        # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
-        kl_div_loss = self.kl_div(student_log_probs, teacher_probs) * (T * T)
+            # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
+            kl_div_loss = self.kl_div(student_log_probs, teacher_probs) * (T * T)
 
-        # -- Total
-        loss = self.lam_mse * mse_loss + self.lam_kl_div * kl_div_loss
+            loss += self.lam_kl_div * kl_div_loss
 
         return loss
 
