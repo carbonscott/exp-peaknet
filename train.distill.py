@@ -681,8 +681,14 @@ class KnowledgeDistillationLoss(nn.Module):
         # -- KL div loss
         if self.lam_kl > 0:
             T = self.temperature
+            B, C, H, W = student_logits.shape
+
             student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
             teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
+
+            # Reshape tensors to (B*H*W, C) for KL divergence calculation
+            student_log_probs = student_log_probs.permute(0, 2, 3, 1).view(-1, C)
+            teacher_probs = teacher_probs.permute(0, 2, 3, 1).view(-1, C)
 
             # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
             kl_loss = self.kl_criterion(student_log_probs, teacher_probs) * (T * T)
