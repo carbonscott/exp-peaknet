@@ -15,6 +15,7 @@ import inspect
 import logging
 import traceback
 import time
+import math
 
 from functools  import partial
 from contextlib import nullcontext
@@ -211,7 +212,8 @@ loss_config      = config.get("loss")
 grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 temperature      = loss_config.get("temperature", 1.0)
 lam_mse          = loss_config.get("lam_mse", 0.5)
-lam_kl_div       = loss_config.get("lam_kl_div", 0.5)
+lam_kl           = loss_config.get("lam_kl", 0.5)
+ema_momentum     = loss_config.get("ema_momentum", 0.9)
 
 # -- Optimizer
 optim_config = config.get("optim")
@@ -638,37 +640,60 @@ if dist_rank == 0:
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring criterion...')
+class EMA:
+    def __init__(self, momentum=0.9):
+        self.momentum = momentum
+        self.ema = None
+
+    def update(self, x):
+        """Exponential moving average
+           x(n) ema(n)
+           -----------
+           x0   ema(0)=x0
+           x1   ema(1)=momentum*x1 + (1-momentum)*ema(0)
+           x2   ema(2)=momentum*x2 + (1-momentum)*ema(1)
+           ...
+        """
+        self.ema = x if self.ema is None else self.momentum*x + (1-self.momentum)*self.ema
+        return self.ema
+
 class KnowledgeDistillationLoss(nn.Module):
-    def __init__(self, temperature=2.0, lam_mse=0.5, lam_kl_div=0.5):
+    def __init__(self, temperature=2.0, lam_mse=0.5, lam_kl=0.5, ema_momentum=0.9):
         super().__init__()
-        self.temperature = temperature
-        self.mse         = nn.MSELoss()
-        self.kl_div      = nn.KLDivLoss(reduction="batchmean")
-        self.lam_mse     = lam_mse
-        self.lam_kl_div  = lam_kl_div
+        self.temperature   = temperature
+        self.mse_criterion = nn.MSELoss()
+        self.kl_criterion  = nn.KLDivLoss(reduction="batchmean")
+        self.lam_mse       = lam_mse
+        self.lam_kl        = lam_kl
+
+        self.mse_scaler = EMA(ema_momentum) if ema_momentum is not None else None
+        self.kl_scaler  = EMA(ema_momentum) if ema_momentum is not None else None
 
     def forward(self, student_logits, teacher_logits):
         loss = 0.0
 
         # -- MSE loss on logits
         if self.lam_mse > 0:
-            mse_loss = self.mse(student_logits, teacher_logits)
-            loss += self.lam_mse * mse_loss
+            mse_loss = self.mse_criterion(student_logits, teacher_logits)
+            mse_scale = self.mse_scaler.update(math.log(1 + 1 / mse_loss.detach())) if self.mse_scaler is not None else 1  # Log-based scaling to avoid spikes when loss is small
+            loss += self.lam_mse * mse_scale * mse_loss
 
         # -- KL div loss
-        if self.lam_kl_div > 0:
+        if self.lam_kl > 0:
             T = self.temperature
             student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
             teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
 
             # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
-            kl_div_loss = self.kl_div(student_log_probs, teacher_probs) * (T * T)
+            kl_loss = self.kl_criterion(student_log_probs, teacher_probs) * (T * T)
 
-            loss += self.lam_kl_div * kl_div_loss
+            kl_scale = self.kl_scaler.update(math.log(1 + 1 / kl_loss.detach())) if self.kl_scaler is not None else 1
+
+            loss += self.lam_kl * kl_scale * kl_loss
 
         return loss
 
-criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl_div=lam_kl_div)
+criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
 # ----------------------------------------------------------------------- #
 #  OPTIMIZER AND SCHEDULER

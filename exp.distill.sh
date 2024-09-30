@@ -1,9 +1,9 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-NUM_MPI_TASKS=10
+NUM_MPI_TASKS=4
 
-JOB=distill-5.1
+JOB=distill-6.0
 BATCH_SIZE=4
 H_PAD=1920
 W_PAD=1920
@@ -23,8 +23,9 @@ SHARDING_STAGE="zero3"
 
 # [KNOWLEDGE DISTILLATION]
 TEMPERATURE=2.0
-LAM_MSE=0.0
-LAM_KL_DIV=1.0
+LAM_MSE=0.5
+LAM_KL=0.5
+EMA_MOMENTUM=0.9
 
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
@@ -66,7 +67,8 @@ distill_config.model.seg_head.uses_learned_upsample=true \
 distill_config.loss.grad_accum_steps=$GRAD_ACCUM_STEPS \
 distill_config.loss.temperature=$TEMPERATURE \
 distill_config.loss.lam_mse=$LAM_MSE \
-distill_config.loss.lam_kl_div=$LAM_KL_DIV \
+distill_config.loss.lam_kl=$LAM_KL \
+distill_config.loss.ema_momentum=$EMA_MOMENTUM \
 distill_config.optim.lr=0.0003 \
 distill_config.optim.fused=false \
 distill_config.misc.monitors_dynamics=false \

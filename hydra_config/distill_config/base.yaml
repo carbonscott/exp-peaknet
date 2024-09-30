@@ -50,8 +50,9 @@ logging:
 loss:
   grad_accum_steps: 4
   temperature: 1.0
-  lam_mse    : 0.2
-  lam_kl_div : 0.8
+  lam_mse     : 0.2
+  lam_kl      : 0.8
+  ema_momentum: 0.9
 lr_scheduler:
   min_lr                     : !!float 1e-7
   total_iterations           : !!int 1_000_000
