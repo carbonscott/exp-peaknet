@@ -669,8 +669,10 @@ class KnowledgeDistillationLoss(nn.Module):
         self.mse_scaler = EMA(ema_momentum) if ema_momentum is not None else None
         self.kl_scaler  = EMA(ema_momentum) if ema_momentum is not None else None
 
-    def forward(self, student_logits, teacher_logits):
-        loss = 0.0
+    def forward(self, student_logits, teacher_logits, returns_final_loss_only = True):
+        loss = torch.tensor(0.0, device=student_logits.device)
+        mse_loss = torch.tensor(0.0, device=student_logits.device)
+        kl_loss = torch.tensor(0.0, device=student_logits.device)
 
         # -- MSE loss on logits
         if self.lam_mse > 0:
@@ -697,7 +699,7 @@ class KnowledgeDistillationLoss(nn.Module):
 
             loss += self.lam_kl * kl_scale * kl_loss
 
-        return loss
+        return loss if returns_final_loss_only else (loss, mse_loss, kl_loss)
 
 criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
