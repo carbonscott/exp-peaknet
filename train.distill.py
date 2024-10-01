@@ -727,13 +727,17 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
-loss_min = float('inf')
+loss_min     = float('inf')
+mse_loss_chkpt = float('inf')
+kl_loss_chkpt  = float('inf')
 iter_state = dict(
-    epoch     = 0,
-    seg       = 0,
-    start_idx = dataset_train.start_idx,
-    end_idx   = dataset_train.end_idx,
-    loss_min  = loss_min,
+    epoch        = 0,
+    seg          = 0,
+    start_idx    = dataset_train.start_idx,
+    end_idx      = dataset_train.end_idx,
+    loss_min     = loss_min,
+    mse_loss     = mse_loss_chkpt,
+    kl_loss      = kl_loss_chkpt,
 )
 
 # -- Optional resumption
@@ -745,12 +749,19 @@ if from_resume:
         checkpointer.post_fsdp_load(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt_prev)
 
         # Training state
-        last_epoch = iter_state.get("epoch")
-        last_seg   = iter_state.get("seg")
-        loss_min   = iter_state.get("loss_min")
+        last_epoch   = iter_state.get("epoch")
+        last_seg     = iter_state.get("seg")
+        start_idx    = iter_state.get("start_idx")
+        end_idx      = iter_state.get("end_idx")
+        loss_min     = iter_state.get("loss_min")
+        mse_loss     = iter_state.get("mse_loss")
+        kl_loss      = iter_state.get("kl_loss")
 
         logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
-        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {iter_state.get('start_idx')}-{iter_state.get('end_idx')}, loss_min = {loss_min}")
+        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {start_idx}-{end_idx}, "
+                    f"loss min = {loss_min}, "
+                    f"mse loss min = {mse_loss}, "
+                    f"kl loss min = {kl_loss}")
 
 
 # ----------------------------------------------------------------------- #
@@ -808,7 +819,7 @@ def estimate_loss(
     if max_iter is None:
         max_iter = len(dataloader)
 
-    losses      = torch.zeros(len(dataloader), device = device)
+    losses      = torch.zeros(len(dataloader), 3, device = device)  # (loss, mse, kl)
     num_samples = torch.zeros(len(dataloader), device = device)
     proc_masks  = torch.zeros(len(dataloader), device = device)  # A mask to track the process
     none_mask   = torch.zeros(len(dataloader), device = device)  # Mask for None batches
@@ -873,8 +884,7 @@ def estimate_loss(
 
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
-            loss = criterion(batch_output, batch_target)
-            loss = loss.mean()
+            loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
 
         # !!!!!!!!!!!!!!!
         # !! Data dump !!
@@ -897,7 +907,7 @@ def estimate_loss(
 
     # -- Handle nan
     # Obtain the nan mask
-    non_nan_mask = ~torch.isnan(losses)
+    non_nan_mask = ~torch.isnan(losses[:, 0])
 
     # Get the actual mask of values that are from the processing loop and non nan
     masks = torch.logical_and(proc_masks>0, non_nan_mask)
@@ -905,23 +915,23 @@ def estimate_loss(
 
     # -- Mean loss over eval iterations
     local_valid_losses = losses[masks].to(torch.float32)
-    local_losses_mean  = local_valid_losses.mean()  # torch.isnan(torch.tensor([]).mean()) -> True
+    local_losses_mean  = local_valid_losses.mean(dim=0)  # torch.isnan(torch.tensor([]).mean()) -> True, shape (3,) for (loss, mse, kl)
 
     # -- Mean loss over ranks
     # Survey the occurence of nan across ranks
     world_nan_counter = torch.tensor(0, dtype = torch.int, device = device)
-    local_nan_masks = torch.isnan(local_losses_mean)
+    local_nan_masks = torch.isnan(local_losses_mean[0])  # Check nan in total loss
     if local_nan_masks.any().item():
         logger.error(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
         world_nan_counter += 1
-        local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
+        local_losses_mean *= 0.0    # Contribute to nothing in the reduced sum
     if uses_dist: dist.all_reduce(world_nan_counter, op = dist.ReduceOp.SUM)
 
     # Scale the local loss for the final reduced sum
     local_losses_mean /= (dist_world_size - world_nan_counter + 1e-6)
 
     # Calculate reduced sum as the final mean loss
-    world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)
+    world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)  # (loss, mse, kl)
     world_losses_mean += local_losses_mean.to(torch.float32)
     if uses_dist: dist.all_reduce(world_losses_mean, op = dist.ReduceOp.SUM)
 
@@ -943,7 +953,7 @@ def estimate_loss(
 
     model.train()
 
-    return world_losses_mean
+    return world_losses_mean  # (loss, mse, kl)
 
 
 def is_last_batch(batch_idx, num_batches):
@@ -1419,9 +1429,9 @@ try:
                         # ---- - Eval
                         # ---- -- Train
                         # Get a random subset of the training set
-                        train_loss = torch.tensor(float('nan'))
+                        train_loss = torch.full((3,), float('nan'), device=device)  # (total, mse, kl)
                         num_eval_retry = 0
-                        while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
+                        while torch.isnan(train_loss[0]) and (num_eval_retry < max_eval_retry):
                             dataset_eval_train.reset()
                             high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
@@ -1469,11 +1479,14 @@ try:
                         if dist_rank == 0:
                             seg_start_idx = dataset_eval_train.start_idx
                             seg_end_idx   = dataset_eval_train.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
+                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, "
+                                        f"mean train loss = {train_loss[0].item():.8f}, "
+                                        f"mean mse loss = {train_loss[1].item():.8f}, "
+                                        f"mean kl loss = {train_loss[2].item():.8f}")
 
                         # ---- -- Validation
                         # Get a random subset of the validation set
-                        validate_loss = torch.tensor(float('nan'))
+                        validate_loss = torch.full((3,), float('nan'), device=device)  # (total, mse, kl)
                         num_eval_retry = 0
                         while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
                             dataset_eval_val.reset()
@@ -1522,18 +1535,25 @@ try:
                         if dist_rank == 0:
                             seg_start_idx = dataset_eval_val.start_idx
                             seg_end_idx   = dataset_eval_val.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
+                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, "
+                                        f"mean validation loss = {validate_loss[0].item():.8f}, "
+                                        f"mean mse loss = {validate_loss[1].item():.8f}, "
+                                        f"mean kl loss = {validate_loss[2].item():.8f}")
 
                         # ---- - Save checkpoint
-                        if validate_loss < loss_min:
-                            loss_min = validate_loss
+                        if validate_loss[0] < loss_min:  # Compare the total loss
+                            loss_min       = validate_loss[0]
+                            mse_loss_chkpt = validate_loss[1]
+                            kl_loss_chkpt  = validate_loss[2]
 
                             # Collect training state
                             iter_state["epoch"]     = epoch
                             iter_state["seg"]       = seg
                             iter_state["start_idx"] = dataset_train.start_idx
                             iter_state["end_idx"]   = dataset_train.end_idx
-                            iter_state["loss_min"]  = loss_min
+                            iter_state["loss_min"]  = loss_min_chkpt
+                            iter_state["mse_loss"]  = mse_loss_chkpt
+                            iter_state["kl_loss"]   = kl_loss
 
                             dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                             if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
@@ -1555,6 +1575,8 @@ try:
                         iter_state["start_idx"] = dataset_train.start_idx
                         iter_state["end_idx"]   = dataset_train.end_idx
                         iter_state["loss_min"]  = loss_min
+                        iter_state["mse_loss"]  = mse_loss_chkpt
+                        iter_state["kl_loss"]   = kl_loss_chkpt
 
                         dir_chkpt = f"{timestamp}.preempt"
                         if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
