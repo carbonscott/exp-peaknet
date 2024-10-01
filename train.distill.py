@@ -683,14 +683,14 @@ class KnowledgeDistillationLoss(nn.Module):
         # -- KL div loss
         if self.lam_kl > 0:
             T = self.temperature
-            B, C, H, W = student_logits.shape
 
             student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
             teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
 
             # Reshape tensors to (B*H*W, C) for KL divergence calculation
-            student_log_probs = student_log_probs.permute(0, 2, 3, 1).view(-1, C)
-            teacher_probs = teacher_probs.permute(0, 2, 3, 1).view(-1, C)
+            B, C, H, W = student_log_probs.shape
+            student_log_probs = student_log_probs.permute(0, 2, 3, 1).contiguous().view(B*H*W, C)
+            teacher_probs = teacher_probs.permute(0, 2, 3, 1).contiguous().view(B*H*W, C)
 
             # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
             kl_loss = self.kl_criterion(student_log_probs, teacher_probs) * (T * T)
@@ -699,7 +699,7 @@ class KnowledgeDistillationLoss(nn.Module):
 
             loss += self.lam_kl * kl_scale * kl_loss
 
-        return loss if returns_total_loss_only else torch.tensor([loss, mse_loss, kl_loss], device=student_logits.device)
+        return loss if returns_total_loss_only else (loss, mse_loss, kl_loss)
 
 criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
@@ -884,7 +884,7 @@ def estimate_loss(
 
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
-            loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
+            loss, mse_loss, kl_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
 
         # !!!!!!!!!!!!!!!
         # !! Data dump !!
@@ -901,13 +901,13 @@ def estimate_loss(
             path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.loop.pt')
             torch.save(data_dump, path_data_dump)
 
-        losses     [enum_idx] = loss
+        losses     [enum_idx] = torch.tensor([loss, mse_loss, kl_loss], device=device)
         num_samples[enum_idx] = len(batch_input)
         proc_masks [enum_idx] = 1
 
     # -- Handle nan
     # Obtain the nan mask
-    non_nan_mask = ~torch.isnan(losses[:, 0])
+    non_nan_mask = ~torch.isnan(losses[:, 0])  # Consider only the overall loss
 
     # Get the actual mask of values that are from the processing loop and non nan
     masks = torch.logical_and(proc_masks>0, non_nan_mask)
@@ -1261,12 +1261,16 @@ try:
                     # Forward
                     with autocast_context:
                         batch_output = model(batch_input)
-                        loss = criterion(batch_output, batch_target, returns_total_loss_only=False)  # (loss, mse_loss, kl_loss)
-                        loss = loss / real_grad_accum_steps  # scale the loss to account for gradient accumulation
-                        logger.debug(f"[Rank {dist_rank}] loss = {loss}")
+                        loss, mse_loss, kl_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)  # (loss, mse_loss, kl_loss)
+                        loss     = loss     / real_grad_accum_steps  # scale the loss to account for gradient accumulation
+                        mse_loss = mse_loss / real_grad_accum_steps
+                        kl_loss  = kl_loss  / real_grad_accum_steps
+                        logger.debug(f"[Rank {dist_rank}] loss = {loss} | mse_loss = {mse_loss} | kl_loss = {kl_loss}")
 
                     # Accumulate loss
-                    total_loss += loss.detach()
+                    total_loss[0] += loss.detach()
+                    total_loss[1] += mse_loss.detach()
+                    total_loss[2] += kl_loss.detach()
 
                     # Accumulate number of tokens processed
                     total_numel = batch_input.numel()  # Get number of numeric elements
@@ -1488,7 +1492,7 @@ try:
                         # Get a random subset of the validation set
                         validate_loss = torch.full((3,), float('nan'), device=device)  # (total, mse, kl)
                         num_eval_retry = 0
-                        while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
+                        while torch.isnan(validate_loss[0]) and (num_eval_retry < max_eval_retry):
                             dataset_eval_val.reset()
                             high_seg_idx = max(dataset_eval_val.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
@@ -1551,9 +1555,9 @@ try:
                             iter_state["seg"]       = seg
                             iter_state["start_idx"] = dataset_train.start_idx
                             iter_state["end_idx"]   = dataset_train.end_idx
-                            iter_state["loss_min"]  = loss_min_chkpt
+                            iter_state["loss_min"]  = loss_min
                             iter_state["mse_loss"]  = mse_loss_chkpt
-                            iter_state["kl_loss"]   = kl_loss
+                            iter_state["kl_loss"]   = kl_loss_chkpt
 
                             dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                             if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
