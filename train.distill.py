@@ -669,7 +669,7 @@ class KnowledgeDistillationLoss(nn.Module):
         self.mse_scaler = EMA(ema_momentum) if ema_momentum is not None else None
         self.kl_scaler  = EMA(ema_momentum) if ema_momentum is not None else None
 
-    def forward(self, student_logits, teacher_logits, returns_final_loss_only = True):
+    def forward(self, student_logits, teacher_logits, returns_total_loss_only = True):
         loss = torch.tensor(0.0, device=student_logits.device)
         mse_loss = torch.tensor(0.0, device=student_logits.device)
         kl_loss = torch.tensor(0.0, device=student_logits.device)
@@ -699,7 +699,7 @@ class KnowledgeDistillationLoss(nn.Module):
 
             loss += self.lam_kl * kl_scale * kl_loss
 
-        return loss if returns_final_loss_only else (loss, mse_loss, kl_loss)
+        return loss if returns_total_loss_only else torch.tensor([loss, mse_loss, kl_loss], device=student_logits.device)
 
 criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
@@ -1197,7 +1197,7 @@ try:
             start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
 
             # Aggregate the loss and number of processed tokens during each gradient accumulation
-            total_loss       = torch.tensor(0.0, device = device)
+            total_loss       = torch.zeros(3, device = device)  # (loss, mse_loss, kl_loss)
             total_num_tokens = torch.tensor(0.0, device = device)
 
             # Set a timer flag
@@ -1251,8 +1251,7 @@ try:
                     # Forward
                     with autocast_context:
                         batch_output = model(batch_input)
-                        loss = criterion(batch_output, batch_target)
-                        loss = loss.mean()
+                        loss = criterion(batch_output, batch_target, returns_total_loss_only=False)  # (loss, mse_loss, kl_loss)
                         loss = loss / real_grad_accum_steps  # scale the loss to account for gradient accumulation
                         logger.debug(f"[Rank {dist_rank}] loss = {loss}")
 
@@ -1325,9 +1324,11 @@ try:
                             "logevent"           : "LOSS:TRAIN",
                             "iteration"          : iteration_counter,
                             "segment"            : f"{seg_start_idx}-{seg_end_idx}",
-                            "learning_rate"      : ",".join(f"{lr}" for lr in current_lrs),
+                            "learning_rate"      : ",".join(f"{lr:.6f}" for lr in current_lrs),
                             "grad_norm"          : f"{grad_norm:.6f}",
-                            "mean_train_loss"    : f"{total_loss:.6f}",
+                            "mean_train_loss"    : f"{total_loss[0].item():.6f}",
+                            "mean_mse_loss"      : f"{total_loss[1].item():.6f}",
+                            "mean_kl_loss"       : f"{total_loss[2].item():.6f}",
                             "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
                             "mfu_per_iteration"  : f"{mfu_per_iteration:.3f}",
                             "grad_nosync_counter": grad_nosync_counter,
