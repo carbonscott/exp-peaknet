@@ -726,7 +726,7 @@ class KnowledgeDistillationLoss(nn.Module):
 
             loss += self.lam_focal * focal_scale * focal_loss
 
-        return loss if returns_total_loss_only else (loss, mse_loss, kl_loss)
+        return loss if returns_total_loss_only else (loss, mse_loss, kl_loss, focal_loss)
 
 criterion = KnowledgeDistillationLoss(focal_alpha, focal_gamma, seghead_num_classes, temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
@@ -754,9 +754,10 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
-loss_min     = float('inf')
-mse_loss_chkpt = float('inf')
-kl_loss_chkpt  = float('inf')
+loss_min         = float('inf')
+mse_loss_chkpt   = float('inf')
+kl_loss_chkpt    = float('inf')
+focal_loss_chkpt = float('inf')
 iter_state = dict(
     epoch        = 0,
     seg          = 0,
@@ -765,6 +766,7 @@ iter_state = dict(
     loss_min     = loss_min,
     mse_loss     = mse_loss_chkpt,
     kl_loss      = kl_loss_chkpt,
+    focal_loss   = focal_loss_chkpt,
 )
 
 # -- Optional resumption
@@ -776,19 +778,21 @@ if from_resume:
         checkpointer.post_fsdp_load(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt_prev)
 
         # Training state
-        last_epoch   = iter_state.get("epoch")
-        last_seg     = iter_state.get("seg")
-        start_idx    = iter_state.get("start_idx")
-        end_idx      = iter_state.get("end_idx")
-        loss_min     = iter_state.get("loss_min")
-        mse_loss     = iter_state.get("mse_loss")
-        kl_loss      = iter_state.get("kl_loss")
+        last_epoch = iter_state.get("epoch")
+        last_seg   = iter_state.get("seg")
+        start_idx  = iter_state.get("start_idx")
+        end_idx    = iter_state.get("end_idx")
+        loss_min   = iter_state.get("loss_min")
+        mse_loss   = iter_state.get("mse_loss")
+        kl_loss    = iter_state.get("kl_loss")
+        focal_loss = iter_state.get("focal_loss")
 
         logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
         logger.info(f"PREV - last_epoch {last_epoch}, last_seg {start_idx}-{end_idx}, "
                     f"loss min = {loss_min}, "
                     f"mse loss min = {mse_loss}, "
-                    f"kl loss min = {kl_loss}")
+                    f"kl loss min = {kl_loss}, "
+                    f"kl loss min = {focal_loss}")
 
 
 # ----------------------------------------------------------------------- #
@@ -846,7 +850,7 @@ def estimate_loss(
     if max_iter is None:
         max_iter = len(dataloader)
 
-    losses      = torch.zeros(len(dataloader), 3, device = device)  # (loss, mse, kl)
+    losses      = torch.zeros(len(dataloader), 4, device = device)  # (loss, mse, kl)
     num_samples = torch.zeros(len(dataloader), device = device)
     proc_masks  = torch.zeros(len(dataloader), device = device)  # A mask to track the process
     none_mask   = torch.zeros(len(dataloader), device = device)  # Mask for None batches
@@ -911,7 +915,7 @@ def estimate_loss(
 
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
-            loss, mse_loss, kl_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
+            loss, mse_loss, kl_loss, focal_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
 
         # !!!!!!!!!!!!!!!
         # !! Data dump !!
@@ -928,7 +932,7 @@ def estimate_loss(
             path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.loop.pt')
             torch.save(data_dump, path_data_dump)
 
-        losses     [enum_idx] = torch.tensor([loss, mse_loss, kl_loss], device=device)
+        losses     [enum_idx] = torch.tensor([loss, mse_loss, kl_loss, focal_loss], device=device)
         num_samples[enum_idx] = len(batch_input)
         proc_masks [enum_idx] = 1
 
@@ -1234,7 +1238,7 @@ try:
             start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
 
             # Aggregate the loss and number of processed tokens during each gradient accumulation
-            total_loss       = torch.zeros(3, device = device)  # (loss, mse_loss, kl_loss)
+            total_loss       = torch.zeros(4, device = device)  # (loss, mse_loss, kl_loss, focal_loss)
             total_num_tokens = torch.tensor(0.0, device = device)
 
             # Set a timer flag
@@ -1288,16 +1292,18 @@ try:
                     # Forward
                     with autocast_context:
                         batch_output = model(batch_input)
-                        loss, mse_loss, kl_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)  # (loss, mse_loss, kl_loss)
-                        loss     = loss     / real_grad_accum_steps  # scale the loss to account for gradient accumulation
-                        mse_loss = mse_loss / real_grad_accum_steps
-                        kl_loss  = kl_loss  / real_grad_accum_steps
-                        logger.debug(f"[Rank {dist_rank}] loss = {loss} | mse_loss = {mse_loss} | kl_loss = {kl_loss}")
+                        loss, mse_loss, kl_loss, focal_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
+                        loss       = loss     / real_grad_accum_steps  # scale the loss to account for gradient accumulation
+                        mse_loss   = mse_loss / real_grad_accum_steps
+                        kl_loss    = kl_loss  / real_grad_accum_steps
+                        focal_loss = focal_loss  / real_grad_accum_steps
+                        logger.debug(f"[Rank {dist_rank}] loss = {loss} | mse_loss = {mse_loss} | kl_loss = {kl_loss} | focal_loss = {focal_loss}")
 
                     # Accumulate loss
                     total_loss[0] += loss.detach()
                     total_loss[1] += mse_loss.detach()
                     total_loss[2] += kl_loss.detach()
+                    total_loss[3] += focal_loss.detach()
 
                     # Accumulate number of tokens processed
                     total_numel = batch_input.numel()  # Get number of numeric elements
@@ -1370,6 +1376,7 @@ try:
                             "mean_train_loss"    : f"{total_loss[0].item():.6f}",
                             "mean_mse_loss"      : f"{total_loss[1].item():.6f}",
                             "mean_kl_loss"       : f"{total_loss[2].item():.6f}",
+                            "mean_focal_loss"    : f"{total_loss[3].item():.6f}",
                             "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
                             "mfu_per_iteration"  : f"{mfu_per_iteration:.3f}",
                             "grad_nosync_counter": grad_nosync_counter,
@@ -1573,9 +1580,10 @@ try:
 
                         # ---- - Save checkpoint
                         if validate_loss[0] < loss_min:  # Compare the total loss
-                            loss_min       = validate_loss[0]
-                            mse_loss_chkpt = validate_loss[1]
-                            kl_loss_chkpt  = validate_loss[2]
+                            loss_min         = validate_loss[0]
+                            mse_loss_chkpt   = validate_loss[1]
+                            kl_loss_chkpt    = validate_loss[2]
+                            focal_loss_chkpt = validate_loss[3]
 
                             # Collect training state
                             iter_state["epoch"]     = epoch
@@ -1585,6 +1593,7 @@ try:
                             iter_state["loss_min"]  = loss_min
                             iter_state["mse_loss"]  = mse_loss_chkpt
                             iter_state["kl_loss"]   = kl_loss_chkpt
+                            iter_state["focal_loss"]= focal_loss_chkpt
 
                             dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                             if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
@@ -1608,6 +1617,7 @@ try:
                         iter_state["loss_min"]  = loss_min
                         iter_state["mse_loss"]  = mse_loss_chkpt
                         iter_state["kl_loss"]   = kl_loss_chkpt
+                        iter_state["focal_loss"]= focal_loss_chkpt
 
                         dir_chkpt = f"{timestamp}.preempt"
                         if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
