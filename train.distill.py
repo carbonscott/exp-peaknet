@@ -61,6 +61,9 @@ from peaknet.modeling.bifpn_config import (
 )
 from peaknet.modeling.bifpn import BiFPNBlock, BiFPN
 
+# --- Loss
+from peaknet.criterion import CategoricalFocalLoss
+
 # --- Others
 from peaknet.utils.seed        import set_seed
 from peaknet.utils.misc        import is_action_due
@@ -210,9 +213,13 @@ seghead_num_classes       = seghead_params.get("num_classes")
 # -- Loss
 loss_config      = config.get("loss")
 grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
+focal_config     = loss_config.get("focal")
+focal_alpha      = focal_config.get("alpha")
+focal_gamma      = focal_config.get("gamma")
 temperature      = loss_config.get("temperature", 1.0)
-lam_mse          = loss_config.get("lam_mse", 0.5)
-lam_kl           = loss_config.get("lam_kl", 0.5)
+lam_mse          = loss_config.get("lam_mse", 0.4)
+lam_kl           = loss_config.get("lam_kl", 0.4)
+lam_focal        = loss_config.get("lam_focal", 0.2)
 ema_momentum     = loss_config.get("ema_momentum", 0.9)
 
 # -- Optimizer
@@ -658,21 +665,31 @@ class EMA:
         return self.ema
 
 class KnowledgeDistillationLoss(nn.Module):
-    def __init__(self, temperature=2.0, lam_mse=0.5, lam_kl=0.5, ema_momentum=0.9):
+    def __init__(self, focal_alpha, focal_gamma, focal_num_classes, temperature=2.0, lam_mse=0.5, lam_kl=0.5, ema_momentum=0.9):
         super().__init__()
         self.temperature   = temperature
+
         self.mse_criterion = nn.MSELoss()
         self.kl_criterion  = nn.KLDivLoss(reduction="batchmean")
-        self.lam_mse       = lam_mse
-        self.lam_kl        = lam_kl
+        self.focal_criterion = CategoricalFocalLoss(
+            alpha       = focal_alpha,
+            gamma       = focal_gamma,
+            num_classes = focal_num_classes,
+        )
 
-        self.mse_scaler = EMA(ema_momentum) if ema_momentum is not None else None
-        self.kl_scaler  = EMA(ema_momentum) if ema_momentum is not None else None
+        self.lam_mse   = lam_mse
+        self.lam_kl    = lam_kl
+        self.lam_focal = lam_focal
+
+        self.mse_scaler   = EMA(ema_momentum) if ema_momentum is not None else None
+        self.kl_scaler    = EMA(ema_momentum) if ema_momentum is not None else None
+        self.focal_scaler = EMA(ema_momentum) if ema_momentum is not None else None
 
     def forward(self, student_logits, teacher_logits, returns_total_loss_only = True):
         loss = torch.tensor(0.0, device=student_logits.device)
         mse_loss = torch.tensor(0.0, device=student_logits.device)
         kl_loss = torch.tensor(0.0, device=student_logits.device)
+        focal_loss = torch.tensor(0.0, device=student_logits.device)
 
         # -- MSE loss on logits
         if self.lam_mse > 0:
@@ -699,9 +716,19 @@ class KnowledgeDistillationLoss(nn.Module):
 
             loss += self.lam_kl * kl_scale * kl_loss
 
+        # -- Focal loss
+        if self.lam_focal > 0:
+            teacher_probs = F.softmax(teacher_logits, dim=1)
+            teacher_hard_labels = torch.argmax(teacher_probs, dim=1, keepdim=True)  # (B,C,H,W)
+            focal_loss = self.focal_criterion(student_logits, teacher_hard_labels).mean()
+
+            focal_scale = self.focal_scaler.update(math.log(1 + 1 / focal_loss.detach())) if self.focal_scaler is not None else 1
+
+            loss += self.lam_focal * focal_scale * focal_loss
+
         return loss if returns_total_loss_only else (loss, mse_loss, kl_loss)
 
-criterion = KnowledgeDistillationLoss(temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
+criterion = KnowledgeDistillationLoss(focal_alpha, focal_gamma, seghead_num_classes, temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
 # ----------------------------------------------------------------------- #
 #  OPTIMIZER AND SCHEDULER
