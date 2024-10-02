@@ -792,7 +792,7 @@ if from_resume:
                     f"loss min = {loss_min}, "
                     f"mse loss min = {mse_loss}, "
                     f"kl loss min = {kl_loss}, "
-                    f"kl loss min = {focal_loss}")
+                    f"focal loss min = {focal_loss}")
 
 
 # ----------------------------------------------------------------------- #
@@ -1520,7 +1520,8 @@ try:
                             logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, "
                                         f"mean train loss = {train_loss[0].item():.8f}, "
                                         f"mean mse loss = {train_loss[1].item():.8f}, "
-                                        f"mean kl loss = {train_loss[2].item():.8f}")
+                                        f"mean kl loss = {train_loss[2].item():.8f}, "
+                                        f"mean focal loss = {train_loss[3].item():.8f}")
 
                         # ---- -- Validation
                         # Get a random subset of the validation set
@@ -1576,7 +1577,8 @@ try:
                             logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, "
                                         f"mean validation loss = {validate_loss[0].item():.8f}, "
                                         f"mean mse loss = {validate_loss[1].item():.8f}, "
-                                        f"mean kl loss = {validate_loss[2].item():.8f}")
+                                        f"mean kl loss = {validate_loss[2].item():.8f}, "
+                                        f"mean focal loss = {validate_loss[3].item():.8f}")
 
                         # ---- - Save checkpoint
                         if validate_loss[0] < loss_min:  # Compare the total loss
