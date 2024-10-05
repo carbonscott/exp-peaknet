@@ -3,7 +3,7 @@
 RUNS_NSYS=0
 NUM_MPI_TASKS=10
 
-JOB=s3df-distill-atto-8.0
+JOB=s3df-distill-atto-1.0
 BATCH_SIZE=4
 H_PAD=1920
 W_PAD=1920
@@ -31,8 +31,8 @@ LAM_FOCAL=0.2
 EMA_MOMENTUM=0.9
 
 # [DATASET]
-PATH_TRAIN="distill/train.csv"
-PATH_EVAL="distill/eval.csv"
+PATH_TRAIN="distill/mfxl1025422.train.csv"
+PATH_EVAL="distill/mfxl1025422.eval.csv"
 
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
@@ -50,8 +50,8 @@ distill_config.checkpoint.state_dict_type=full \
 distill_config.checkpoint.preempt_metadata_path=$PREEMPT_METADATA_PATH \
 distill_config.checkpoint.preempt_chkpt_saving_iterations=$PREEEMPT_CHKPT_SAVING_ITERATIONS \
 distill_config.checkpoint.chkpt_saving_iterations=$CHKPT_SAVING_ITERATIONS \
-distill_config.dataset.path_train=distill/train.csv \
-distill_config.dataset.path_eval=distill/eval.csv \
+"distill_config.dataset.path_train=$PATH_TRAIN" \
+"distill_config.dataset.path_eval=$PATH_EVAL" \
 distill_config.dataset.num_workers=$NUM_WORKERS \
 distill_config.dataset.prefetch_factor=10 \
 distill_config.dataset.pin_memory=true \
