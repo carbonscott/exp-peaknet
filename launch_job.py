@@ -18,14 +18,14 @@ def main(cfg: DictConfig):
     job = cfg.job
 
     # -- Job
-    cfg.path.file_yaml_job   = f"{job}.yaml"
-    cfg.path.file_sbatch_job = f"{job}.sbatch"
-    cfg.sbatch_config.job    = cfg.job
+    cfg.path.file_yaml_job = f"{job}.yaml"
+    cfg.path.file_bsub_job = f"{job}.bsub"
+    cfg.bsub_config.job    = cfg.job
 
     # -- Yaml
     os.makedirs(cfg.path.dir_yaml_jobs, exist_ok = True)
     path_yaml = os.path.join(cfg.path.dir_yaml_jobs, cfg.path.file_yaml_job)
-    cfg.sbatch_config.yaml_config = path_yaml
+    cfg.bsub_config.yaml_config = path_yaml
 
     # ----------------------------------------------------------------------- #
     #  YAML
@@ -44,19 +44,19 @@ def main(cfg: DictConfig):
 
 
     # ----------------------------------------------------------------------- #
-    #  SBATCH
+    #  BSUB
     # ----------------------------------------------------------------------- #
-    env             = Environment(loader=FileSystemLoader(cfg.path.dir_sbatch_template))
-    template        = env.get_template(cfg.path.file_sbatch_template)
-    rendered_script = template.render(**cfg.sbatch_config)
+    env             = Environment(loader=FileSystemLoader(cfg.path.dir_bsub_template))
+    template        = env.get_template(cfg.path.file_bsub_template)
+    rendered_script = template.render(**cfg.bsub_config)
 
-    print("Generated SBATCH Script:")
+    print("Generated BSUB Script:")
     print(rendered_script)
     print()
 
-    os.makedirs(cfg.path.dir_sbatch_jobs, exist_ok = True)
-    path_sbatch_job = os.path.join(cfg.path.dir_sbatch_jobs, cfg.path.file_sbatch_job)
-    with open(path_sbatch_job, 'w') as fh:
+    os.makedirs(cfg.path.dir_bsub_jobs, exist_ok = True)
+    path_bsub_job = os.path.join(cfg.path.dir_bsub_jobs, cfg.path.file_bsub_job)
+    with open(path_bsub_job, 'w') as fh:
         fh.write(rendered_script)
 
         fh.write("\n")
@@ -64,10 +64,10 @@ def main(cfg: DictConfig):
         fh.write(end_note)
 
     if cfg.auto_submit:
-        # Executing the sbatch script
-        sbatch_command = f"sbatch {path_sbatch_job}"
-        print(sbatch_command)
-        os.system(sbatch_command)
+        # Executing the bsub script
+        bsub_command = f"bsub {path_bsub_job}"
+        print(bsub_command)
+        os.system(bsub_command)
 
     # ----------------------------------------------------------------------- #
     #  PREEMPTIVE CHECKPOINT METADATA
