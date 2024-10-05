@@ -1,16 +1,13 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-## NUM_MPI_TASKS=4
-NNODES=10
-QOS=debug
-WALLTIME="02:00"
+NUM_MPI_TASKS=10
 
-JOB=summit-distill-atto-1.0
-BATCH_SIZE=2
+JOB=s3df-distill-atto-8.0
+BATCH_SIZE=4
 H_PAD=1920
 W_PAD=1920
-NUM_WORKERS=1
+NUM_WORKERS=2
 USES_PAD=true
 USES_POLAR_CENTER_CROP=false
 USES_BATCH_SAMPLER=false
@@ -33,6 +30,10 @@ LAM_KL=0.4
 LAM_FOCAL=0.2
 EMA_MOMENTUM=0.9
 
+# [DATASET]
+PATH_TRAIN="distill/train.csv"
+PATH_EVAL="distill/eval.csv"
+
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
 PREEMPT_METADATA_PATH="$PREEMPT_ROOT/$JOB"
@@ -42,12 +43,7 @@ SEG_SIZE=$((BATCH_SIZE * 60))
 python launch_job.distill.py \
 job=$JOB \
 auto_submit=false \
-bsub_config.trainer=train.distill.py \
-bsub_config.num_gpus_per_node=6 \
-bsub_config.num_cpus_per_rs=2 \
-bsub_config.num_nodes=$NNODES \
-bsub_config.walltime=$WALLTIME \
-bsub_config.qos=$QOS \
+sbatch_config.trainer=train.distill.py \
 distill_config.checkpoint.prefix=$JOB \
 distill_config.checkpoint.path_chkpt_prev=$PATH_CHKPT_PREV \
 distill_config.checkpoint.state_dict_type=full \
@@ -95,15 +91,14 @@ distill_config.misc.data_dump_on=false \
 distill_config.lr_scheduler.warmup_iterations=$WARMUP \
 distill_config.lr_scheduler.total_iterations=3200 \
 distill_config.logging.prefix=$JOB \
-distill_config.dist.dtype=float16
+distill_config.dist.dtype=bfloat16
 
-## ## base_command="mpirun -n $NUM_MPI_TASKS --map-by ppr:${NUM_MPI_TASKS}:node --bind-to none python train.distill.py experiments/yaml/$JOB.yaml"
-## base_command="mpirun -n $NUM_MPI_TASKS `which python` train.distill.py experiments/yaml/$JOB.yaml"
-## final_command="OMP_NUM_THREADS=1 "
-## 
-## if [ $RUNS_NSYS -eq 1 ]; then
-##     final_command+="nsys profile -w true -t cuda,mpi --mpi-impl=openmpi --wait primary -o /sdf/data/lcls/ds/prj/prjcwang31/results/proj-peaknet/nsight_reports/$JOB.profile -f true --cudabacktrace=true -x true "
-## fi
-## final_command+="$base_command"
-## 
-## eval $final_command
+base_command="mpirun -n $NUM_MPI_TASKS --map-by ppr:${NUM_MPI_TASKS}:node --bind-to none python train.distill.py experiments/yaml/$JOB.yaml"
+final_command="OMP_NUM_THREADS=1 "
+
+if [ $RUNS_NSYS -eq 1 ]; then
+    final_command+="nsys profile -w true -t cuda,mpi --mpi-impl=openmpi --wait primary -o /sdf/data/lcls/ds/prj/prjcwang31/results/proj-peaknet/nsight_reports/$JOB.profile -f true --cudabacktrace=true -x true "
+fi
+final_command+="$base_command"
+
+eval $final_command
