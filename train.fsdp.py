@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # -- S3DF specific imports
-from peaknet.plugins.slac import init_dist_env_on_s3df
-## from peaknet.plugins.olcf import init_dist_env_on_summit
+## from peaknet.plugins.slac import init_dist_env_on_s3df
+from peaknet.plugins.olcf import init_dist_env_on_summit
 
 # -- Basic imports
 import os
@@ -274,8 +274,8 @@ signal.signal(signal.SIGTERM, signal_handler)
 # -- DIST init
 # --- OLCF specific env
 torchrun_exists = int(os.environ.get("RANK", -1)) != -1
-if not torchrun_exists: init_dist_env_on_s3df()
-## if not torchrun_exists: init_dist_env_on_summit()
+## if not torchrun_exists: init_dist_env_on_s3df()
+if not torchrun_exists: init_dist_env_on_summit()
 
 # --- Initialize distributed environment
 uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1

@@ -6,7 +6,7 @@ NUM_MPI_TASKS=4
 JOB=transform-0.0
 FOCAL_ALPHA="[0.25, 0.75]"
 FOCAL_GAMMA=2
-BATCH_SIZE=6
+BATCH_SIZE=2
 H_PAD=1920
 W_PAD=1920
 NUM_WORKERS=2
@@ -25,7 +25,7 @@ PREEMPT_METADATA_PATH="$PREEMPT_ROOT/$JOB"
 
 SEG_SIZE=$((BATCH_SIZE * 60))
 
-python launch_job.slurm.py \
+python launch_job.py \
 job=$JOB \
 auto_submit=false \
 sbatch_config.trainer=train.fsdp.py \
@@ -62,9 +62,9 @@ train_config.misc.data_dump_on=false \
 train_config.lr_scheduler.warmup_iterations=10 \
 train_config.lr_scheduler.total_iterations=3200 \
 train_config.logging.prefix=$JOB \
-train_config.dist.dtype=bfloat16
+train_config.dist.dtype=float16
 
-base_command="mpirun -n $NUM_MPI_TASKS python train.fsdp.py experiments/yaml/$JOB.yaml"
+base_command="mpirun -n $NUM_MPI_TASKS `which python` train.fsdp.py experiments/yaml/$JOB.yaml"
 final_command="OMP_NUM_THREADS=1 "
 
 if [ $RUNS_NSYS -eq 1 ]; then
