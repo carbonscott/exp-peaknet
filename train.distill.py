@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # -- S3DF specific imports
-## from peaknet.plugins.slac import init_dist_env_on_s3df
-from peaknet.plugins.olcf import init_dist_env_on_summit
+from peaknet.plugins.slac import init_dist_env_on_s3df
+## from peaknet.plugins.olcf import init_dist_env_on_summit
 
 # -- Basic imports
 import os
@@ -15,6 +15,7 @@ import inspect
 import logging
 import traceback
 import time
+import math
 
 from functools  import partial
 from contextlib import nullcontext
@@ -22,7 +23,7 @@ from datetime   import timedelta
 
 # -- peaknet specific imports
 # --- Dataset
-from peaknet.datasets.segmented_zarr_dataset import (
+from peaknet.datasets.segmented_zarr_distill_dataset import (
     SegmentedPeakNetDatasetConfig,
     SegmentedPeakNetDataset,
 )
@@ -88,6 +89,7 @@ from transformers.activations import ACT2CLS
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 # -- Fully Sharded Data Parallel (FSDP)
 # --- Main
@@ -214,6 +216,11 @@ grad_accum_steps = max(int(loss_config.get("grad_accum_steps")), 1)
 focal_config     = loss_config.get("focal")
 focal_alpha      = focal_config.get("alpha")
 focal_gamma      = focal_config.get("gamma")
+temperature      = loss_config.get("temperature", 1.0)
+lam_mse          = loss_config.get("lam_mse", 0.4)
+lam_kl           = loss_config.get("lam_kl", 0.4)
+lam_focal        = loss_config.get("lam_focal", 0.2)
+ema_momentum     = loss_config.get("ema_momentum", 0.9)
 
 # -- Optimizer
 optim_config = config.get("optim")
@@ -274,8 +281,8 @@ signal.signal(signal.SIGTERM, signal_handler)
 # -- DIST init
 # --- OLCF specific env
 torchrun_exists = int(os.environ.get("RANK", -1)) != -1
-## if not torchrun_exists: init_dist_env_on_s3df()
-if not torchrun_exists: init_dist_env_on_summit()
+if not torchrun_exists: init_dist_env_on_s3df()
+## if not torchrun_exists: init_dist_env_on_summit()
 
 # --- Initialize distributed environment
 uses_dist = int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -640,12 +647,88 @@ if dist_rank == 0:
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring criterion...')
-criterion = CategoricalFocalLoss(
-    alpha       = focal_alpha,
-    gamma       = focal_gamma,
-    num_classes = seghead_num_classes,
-)
+class EMA:
+    def __init__(self, momentum=0.9):
+        self.momentum = momentum
+        self.ema = None
 
+    def update(self, x):
+        """Exponential moving average
+           x(n) ema(n)
+           -----------
+           x0   ema(0)=x0
+           x1   ema(1)=momentum*x1 + (1-momentum)*ema(0)
+           x2   ema(2)=momentum*x2 + (1-momentum)*ema(1)
+           ...
+        """
+        self.ema = x if self.ema is None else self.momentum*x + (1-self.momentum)*self.ema
+        return self.ema
+
+class KnowledgeDistillationLoss(nn.Module):
+    def __init__(self, focal_alpha, focal_gamma, focal_num_classes, temperature=2.0, lam_mse=0.5, lam_kl=0.5, ema_momentum=0.9):
+        super().__init__()
+        self.temperature   = temperature
+
+        self.mse_criterion = nn.MSELoss()
+        self.kl_criterion  = nn.KLDivLoss(reduction="batchmean")
+        self.focal_criterion = CategoricalFocalLoss(
+            alpha       = focal_alpha,
+            gamma       = focal_gamma,
+            num_classes = focal_num_classes,
+        )
+
+        self.lam_mse   = lam_mse
+        self.lam_kl    = lam_kl
+        self.lam_focal = lam_focal
+
+        self.mse_scaler   = EMA(ema_momentum) if ema_momentum is not None else None
+        self.kl_scaler    = EMA(ema_momentum) if ema_momentum is not None else None
+        self.focal_scaler = EMA(ema_momentum) if ema_momentum is not None else None
+
+    def forward(self, student_logits, teacher_logits, returns_total_loss_only = True):
+        loss = torch.tensor(0.0, device=student_logits.device)
+        mse_loss = torch.tensor(0.0, device=student_logits.device)
+        kl_loss = torch.tensor(0.0, device=student_logits.device)
+        focal_loss = torch.tensor(0.0, device=student_logits.device)
+
+        # -- MSE loss on logits
+        if self.lam_mse > 0:
+            mse_loss = self.mse_criterion(student_logits, teacher_logits)
+            mse_scale = self.mse_scaler.update(math.log(1 + 1 / mse_loss.detach())) if self.mse_scaler is not None else 1  # Log-based scaling to avoid spikes when loss is small
+            loss += self.lam_mse * mse_scale * mse_loss
+
+        # -- KL div loss
+        if self.lam_kl > 0:
+            T = self.temperature
+
+            student_log_probs = F.log_softmax(student_logits / T, dim=1)  # (B,C,H,W)
+            teacher_probs = F.softmax(teacher_logits / T, dim=1)  # (B,C,H,W)
+
+            # Reshape tensors to (B*H*W, C) for KL divergence calculation
+            B, C, H, W = student_log_probs.shape
+            student_log_probs = student_log_probs.permute(0, 2, 3, 1).contiguous().view(B*H*W, C)
+            teacher_probs = teacher_probs.permute(0, 2, 3, 1).contiguous().view(B*H*W, C)
+
+            # Refer to https://arxiv.org/pdf/1503.02531 and https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
+            kl_loss = self.kl_criterion(student_log_probs, teacher_probs) * (T * T)
+
+            kl_scale = self.kl_scaler.update(math.log(1 + 1 / kl_loss.detach())) if self.kl_scaler is not None else 1
+
+            loss += self.lam_kl * kl_scale * kl_loss
+
+        # -- Focal loss
+        if self.lam_focal > 0:
+            teacher_probs = F.softmax(teacher_logits, dim=1)
+            teacher_hard_labels = torch.argmax(teacher_probs, dim=1, keepdim=True)  # (B,C,H,W)
+            focal_loss = self.focal_criterion(student_logits, teacher_hard_labels).mean()
+
+            focal_scale = self.focal_scaler.update(math.log(1 + 1 / focal_loss.detach())) if self.focal_scaler is not None else 1
+
+            loss += self.lam_focal * focal_scale * focal_loss
+
+        return loss if returns_total_loss_only else (loss, mse_loss, kl_loss, focal_loss)
+
+criterion = KnowledgeDistillationLoss(focal_alpha, focal_gamma, seghead_num_classes, temperature=temperature, lam_mse=lam_mse, lam_kl=lam_kl, ema_momentum=ema_momentum)
 
 # ----------------------------------------------------------------------- #
 #  OPTIMIZER AND SCHEDULER
@@ -671,13 +754,19 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
-loss_min = float('inf')
+loss_min         = float('inf')
+mse_loss_chkpt   = float('inf')
+kl_loss_chkpt    = float('inf')
+focal_loss_chkpt = float('inf')
 iter_state = dict(
-    epoch     = 0,
-    seg       = 0,
-    start_idx = dataset_train.start_idx,
-    end_idx   = dataset_train.end_idx,
-    loss_min  = loss_min,
+    epoch        = 0,
+    seg          = 0,
+    start_idx    = dataset_train.start_idx,
+    end_idx      = dataset_train.end_idx,
+    loss_min     = loss_min,
+    mse_loss     = mse_loss_chkpt,
+    kl_loss      = kl_loss_chkpt,
+    focal_loss   = focal_loss_chkpt,
 )
 
 # -- Optional resumption
@@ -691,10 +780,19 @@ if from_resume:
         # Training state
         last_epoch = iter_state.get("epoch")
         last_seg   = iter_state.get("seg")
+        start_idx  = iter_state.get("start_idx")
+        end_idx    = iter_state.get("end_idx")
         loss_min   = iter_state.get("loss_min")
+        mse_loss   = iter_state.get("mse_loss")
+        kl_loss    = iter_state.get("kl_loss")
+        focal_loss = iter_state.get("focal_loss")
 
         logger.info(f"Loading from checkpoint -- {path_chkpt_prev}.")
-        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {iter_state.get('start_idx')}-{iter_state.get('end_idx')}, loss_min = {loss_min}")
+        logger.info(f"PREV - last_epoch {last_epoch}, last_seg {start_idx}-{end_idx}, "
+                    f"loss min = {loss_min}, "
+                    f"mse loss min = {mse_loss}, "
+                    f"kl loss min = {kl_loss}, "
+                    f"focal loss min = {focal_loss}")
 
 
 # ----------------------------------------------------------------------- #
@@ -752,7 +850,7 @@ def estimate_loss(
     if max_iter is None:
         max_iter = len(dataloader)
 
-    losses      = torch.zeros(len(dataloader), device = device)
+    losses      = torch.zeros(len(dataloader), 4, device = device)  # (loss, mse, kl)
     num_samples = torch.zeros(len(dataloader), device = device)
     proc_masks  = torch.zeros(len(dataloader), device = device)  # A mask to track the process
     none_mask   = torch.zeros(len(dataloader), device = device)  # Mask for None batches
@@ -764,16 +862,18 @@ def estimate_loss(
             logger.debug(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
 
         # Create dummy data for a None batch
-        # FIXME: Better data cleaning will eliminate None batch
-        if batch_data is None:
-            logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
-            batch_input  = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
-            batch_target = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
-            none_mask[enum_idx] = 1
-            batch_data = (batch_input, batch_target)
+        ## # FIXME: Better data cleaning will eliminate None batch
+        ## if batch_data is None:
+        ##     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
+        ##     batch_input  = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
+        ##     batch_target = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
+        ##     none_mask[enum_idx] = 1
+        ##     batch_data = (batch_input, batch_target)
 
         # -- Optional batch data transforms on GPUs to improve mfu
         # Concat data to perform the identical transform on input and target
+        batch_input, batch_target = batch_data
+        batch_data = (batch_input, *batch_target.split(1,dim=1)) # (B,2,H,W) -> (B,1,H,W), (B,1,H,W)
         batch_data = torch.cat(batch_data, dim = 0)    # (2*B, C, H, W)
         batch_data = batch_data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
 
@@ -783,13 +883,10 @@ def estimate_loss(
                 batch_data = trans(batch_data)
 
         # Unpack vars
-        current_batch_size = batch_data.size(0) // 2
+        current_batch_size = batch_data.size(0) // 3
         batch_input  = batch_data[                  :current_batch_size]
         batch_target = batch_data[current_batch_size:                  ]
-
-        # Optionally binarize the label
-        if transforms is not None:
-            batch_target = batch_target > 0.5
+        batch_target = torch.cat(batch_target.split(current_batch_size,dim=0),dim=1)  # [IMPROVE] I know, bear with me for now
 
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Post fetching")
@@ -808,6 +905,7 @@ def estimate_loss(
                 mini_batch = enum_idx
 
                 data_dump = {
+                    "batch_data"   : batch_data,
                     "batch_input"  : batch_input,
                     "batch_target" : batch_target,
                     "batch_output" : batch_output,
@@ -817,8 +915,7 @@ def estimate_loss(
 
             if dist_rank == 0:
                 logger.debug(f"[RANK {dist_rank}] EVAL - Loss")
-            loss = criterion(batch_output, batch_target)
-            loss = loss.mean()
+            loss, mse_loss, kl_loss, focal_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
 
         # !!!!!!!!!!!!!!!
         # !! Data dump !!
@@ -835,13 +932,13 @@ def estimate_loss(
             path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.loop.pt')
             torch.save(data_dump, path_data_dump)
 
-        losses     [enum_idx] = loss
+        losses     [enum_idx] = torch.tensor([loss, mse_loss, kl_loss, focal_loss], device=device)
         num_samples[enum_idx] = len(batch_input)
         proc_masks [enum_idx] = 1
 
     # -- Handle nan
     # Obtain the nan mask
-    non_nan_mask = ~torch.isnan(losses)
+    non_nan_mask = ~torch.isnan(losses[:, 0])  # Consider only the overall loss
 
     # Get the actual mask of values that are from the processing loop and non nan
     masks = torch.logical_and(proc_masks>0, non_nan_mask)
@@ -849,23 +946,23 @@ def estimate_loss(
 
     # -- Mean loss over eval iterations
     local_valid_losses = losses[masks].to(torch.float32)
-    local_losses_mean  = local_valid_losses.mean()  # torch.isnan(torch.tensor([]).mean()) -> True
+    local_losses_mean  = local_valid_losses.mean(dim=0)  # torch.isnan(torch.tensor([]).mean()) -> True, shape (3,) for (loss, mse, kl)
 
     # -- Mean loss over ranks
     # Survey the occurence of nan across ranks
     world_nan_counter = torch.tensor(0, dtype = torch.int, device = device)
-    local_nan_masks = torch.isnan(local_losses_mean)
+    local_nan_masks = torch.isnan(local_losses_mean[0])  # Check nan in total loss
     if local_nan_masks.any().item():
         logger.error(f"[RANK {dist_rank}] EVAL ERROR: NaN encountered!!!")
         world_nan_counter += 1
-        local_losses_mean  = 0.0    # Contribute to nothing in the reduced sum
+        local_losses_mean *= 0.0    # Contribute to nothing in the reduced sum
     if uses_dist: dist.all_reduce(world_nan_counter, op = dist.ReduceOp.SUM)
 
     # Scale the local loss for the final reduced sum
     local_losses_mean /= (dist_world_size - world_nan_counter + 1e-6)
 
     # Calculate reduced sum as the final mean loss
-    world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)
+    world_losses_mean  = torch.zeros_like(local_losses_mean, dtype = torch.float32, device = device)  # (loss, mse, kl)
     world_losses_mean += local_losses_mean.to(torch.float32)
     if uses_dist: dist.all_reduce(world_losses_mean, op = dist.ReduceOp.SUM)
 
@@ -887,7 +984,7 @@ def estimate_loss(
 
     model.train()
 
-    return world_losses_mean
+    return world_losses_mean  # (loss, mse, kl)
 
 
 def is_last_batch(batch_idx, num_batches):
@@ -1141,7 +1238,7 @@ try:
             start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
 
             # Aggregate the loss and number of processed tokens during each gradient accumulation
-            total_loss       = torch.tensor(0.0, device = device)
+            total_loss       = torch.zeros(4, device = device)  # (loss, mse_loss, kl_loss, focal_loss)
             total_num_tokens = torch.tensor(0.0, device = device)
 
             # Set a timer flag
@@ -1160,16 +1257,18 @@ try:
                     starts_timer = False
 
                 # ---- Forward/Backward during an iteration
-                # Create dummy data for a None batch
-                # FIXME: Better data cleaning will eliminate None batch
-                if batch_data is None:
-                    logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
-                    batch_input  = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
-                    batch_target = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
-                    batch_data = (batch_input, batch_target)
+                ## # Create dummy data for a None batch
+                ## # FIXME: Better data cleaning will eliminate None batch
+                ## if batch_data is None:
+                ##     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
+                ##     batch_input  = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
+                ##     batch_target = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
+                ##     batch_data = (batch_input, batch_target)
 
                 # Concat data to perform the identical transform on input and target
-                batch_data = torch.cat(batch_data, dim = 0)    # (2*B, C, H, W)
+                batch_input, batch_target = batch_data
+                batch_data = (batch_input, *batch_target.split(1,dim=1)) # (B,2,H,W) -> (B,1,H,W), (B,1,H,W)
+                batch_data = torch.cat(batch_data, dim = 0)    # (3*B, 1, H, W)
                 batch_data = batch_data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
 
                 # Optional transform
@@ -1178,13 +1277,10 @@ try:
                         batch_data = trans(batch_data)
 
                 # Unpack vars
-                current_batch_size = batch_data.size(0) // 2
+                current_batch_size = batch_data.size(0) // 3  # (3B)
                 batch_input  = batch_data[                  :current_batch_size]
                 batch_target = batch_data[current_batch_size:                  ]
-
-                # Optionally binarize the label
-                if transforms is not None:
-                    batch_target = batch_target > 0.5
+                batch_target = torch.cat(batch_target.split(current_batch_size,dim=0),dim=1)  # [IMPROVE] I know, bear with me for now
 
                 # Specify the effective grad accum steps
                 real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
@@ -1196,13 +1292,18 @@ try:
                     # Forward
                     with autocast_context:
                         batch_output = model(batch_input)
-                        loss = criterion(batch_output, batch_target)
-                        loss = loss.mean()
-                        loss = loss / real_grad_accum_steps  # scale the loss to account for gradient accumulation
-                        logger.debug(f"[Rank {dist_rank}] loss = {loss}")
+                        loss, mse_loss, kl_loss, focal_loss = criterion(batch_output, batch_target, returns_total_loss_only=False)
+                        loss       = loss     / real_grad_accum_steps  # scale the loss to account for gradient accumulation
+                        mse_loss   = mse_loss / real_grad_accum_steps
+                        kl_loss    = kl_loss  / real_grad_accum_steps
+                        focal_loss = focal_loss  / real_grad_accum_steps
+                        logger.debug(f"[Rank {dist_rank}] loss = {loss} | mse_loss = {mse_loss} | kl_loss = {kl_loss} | focal_loss = {focal_loss}")
 
                     # Accumulate loss
-                    total_loss += loss.detach()
+                    total_loss[0] += loss.detach()
+                    total_loss[1] += mse_loss.detach()
+                    total_loss[2] += kl_loss.detach()
+                    total_loss[3] += focal_loss.detach()
 
                     # Accumulate number of tokens processed
                     total_numel = batch_input.numel()  # Get number of numeric elements
@@ -1270,9 +1371,12 @@ try:
                             "logevent"           : "LOSS:TRAIN",
                             "iteration"          : iteration_counter,
                             "segment"            : f"{seg_start_idx}-{seg_end_idx}",
-                            "learning_rate"      : ",".join(f"{lr}" for lr in current_lrs),
+                            "learning_rate"      : ",".join(f"{lr:.6f}" for lr in current_lrs),
                             "grad_norm"          : f"{grad_norm:.6f}",
-                            "mean_train_loss"    : f"{total_loss:.6f}",
+                            "mean_train_loss"    : f"{total_loss[0].item():.6f}",
+                            "mean_mse_loss"      : f"{total_loss[1].item():.6f}",
+                            "mean_kl_loss"       : f"{total_loss[2].item():.6f}",
+                            "mean_focal_loss"    : f"{total_loss[3].item():.6f}",
                             "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
                             "mfu_per_iteration"  : f"{mfu_per_iteration:.3f}",
                             "grad_nosync_counter": grad_nosync_counter,
@@ -1363,9 +1467,9 @@ try:
                         # ---- - Eval
                         # ---- -- Train
                         # Get a random subset of the training set
-                        train_loss = torch.tensor(float('nan'))
+                        train_loss = torch.full((3,), float('nan'), device=device)  # (total, mse, kl)
                         num_eval_retry = 0
-                        while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
+                        while torch.isnan(train_loss[0]) and (num_eval_retry < max_eval_retry):
                             dataset_eval_train.reset()
                             high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
@@ -1413,13 +1517,17 @@ try:
                         if dist_rank == 0:
                             seg_start_idx = dataset_eval_train.start_idx
                             seg_end_idx   = dataset_eval_train.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
+                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, "
+                                        f"mean train loss = {train_loss[0].item():.8f}, "
+                                        f"mean mse loss = {train_loss[1].item():.8f}, "
+                                        f"mean kl loss = {train_loss[2].item():.8f}, "
+                                        f"mean focal loss = {train_loss[3].item():.8f}")
 
                         # ---- -- Validation
                         # Get a random subset of the validation set
-                        validate_loss = torch.tensor(float('nan'))
+                        validate_loss = torch.full((3,), float('nan'), device=device)  # (total, mse, kl)
                         num_eval_retry = 0
-                        while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
+                        while torch.isnan(validate_loss[0]) and (num_eval_retry < max_eval_retry):
                             dataset_eval_val.reset()
                             high_seg_idx = max(dataset_eval_val.total_size - seg_size * dist_world_size, 1)
                             rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
@@ -1466,11 +1574,18 @@ try:
                         if dist_rank == 0:
                             seg_start_idx = dataset_eval_val.start_idx
                             seg_end_idx   = dataset_eval_val.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
+                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, "
+                                        f"mean validation loss = {validate_loss[0].item():.8f}, "
+                                        f"mean mse loss = {validate_loss[1].item():.8f}, "
+                                        f"mean kl loss = {validate_loss[2].item():.8f}, "
+                                        f"mean focal loss = {validate_loss[3].item():.8f}")
 
                         # ---- - Save checkpoint
-                        if validate_loss < loss_min:
-                            loss_min = validate_loss
+                        if validate_loss[0] < loss_min:  # Compare the total loss
+                            loss_min         = validate_loss[0]
+                            mse_loss_chkpt   = validate_loss[1]
+                            kl_loss_chkpt    = validate_loss[2]
+                            focal_loss_chkpt = validate_loss[3]
 
                             # Collect training state
                             iter_state["epoch"]     = epoch
@@ -1478,6 +1593,9 @@ try:
                             iter_state["start_idx"] = dataset_train.start_idx
                             iter_state["end_idx"]   = dataset_train.end_idx
                             iter_state["loss_min"]  = loss_min
+                            iter_state["mse_loss"]  = mse_loss_chkpt
+                            iter_state["kl_loss"]   = kl_loss_chkpt
+                            iter_state["focal_loss"]= focal_loss_chkpt
 
                             dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
                             if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
@@ -1499,6 +1617,9 @@ try:
                         iter_state["start_idx"] = dataset_train.start_idx
                         iter_state["end_idx"]   = dataset_train.end_idx
                         iter_state["loss_min"]  = loss_min
+                        iter_state["mse_loss"]  = mse_loss_chkpt
+                        iter_state["kl_loss"]   = kl_loss_chkpt
+                        iter_state["focal_loss"]= focal_loss_chkpt
 
                         dir_chkpt = f"{timestamp}.preempt"
                         if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"

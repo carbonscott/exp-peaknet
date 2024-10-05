@@ -2,6 +2,7 @@ defaults:
   - _self_
   - bsub_config   : base
   - train_config  : base
+  - distill_config: base
   - sbatch_config : base
   - exp_mfu       : base
 

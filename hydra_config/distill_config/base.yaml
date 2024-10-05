@@ -2,7 +2,7 @@ checkpoint:
   state_dict_type                : full
   chkpt_saving_iterations        : 1
   preempt_metadata_path          : null
-  preempt_chkpt_saving_iterations: 1
+  preempt_chkpt_saving_iterations: null
   directory                      : experiments/chkpts
   prefix                         : fsdp
   path_chkpt_prev                : null
@@ -19,11 +19,6 @@ dataset:
   path_eval           : experiments/datasets/safetensor_dataset.validate.csv
   debug               : false
   cache_size          : 10
-  input:
-    C: 1
-    H: 1776
-    W: 1776
-    total_size: 1000000
   transforms:
     H_pad: 1920
     W_pad: 1920
@@ -31,18 +26,17 @@ dataset:
     Wv: 256
     sigma: 0.333
     num_crop: 8
-    num_patch: 20
-    size_patch: 10
+    num_patch: 100
+    size_patch: 20
     angle_max: 360
     frac_shift_max: 0.1
     var_size_patch: 0.2
     sampling_fraction: null
     set:
-      pad          : False
-      random_patch : False
-      random_rotate: False
-      random_shift : False
-      instance_norm: False
+      pad              : False
+      random_patch     : False
+      random_rotate    : False
+      random_shift     : False
       polar_center_crop: False
       batch_sampler    : False
 dist:
@@ -58,6 +52,11 @@ loss:
   focal:
     alpha: [0.25, 0.75]
     gamma: 2.0
+  temperature: 1.0
+  lam_mse     : 0.4
+  lam_kl      : 0.4
+  lam_focal   : 0.2
+  ema_momentum: 0.9
 lr_scheduler:
   min_lr                     : !!float 1e-7
   total_iterations           : !!int 1_000_000
@@ -67,7 +66,7 @@ misc:
   max_epochs          : 50
   max_eval_iter       : 4
   max_eval_retry      : 2
-  sharding_stage      : zero2
+  sharding_stage      : zero3
   compiles_model      : false
   data_dump_on        : false
   peak_flops_per_sec  : !!float 312e12
