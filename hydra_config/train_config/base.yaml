@@ -43,6 +43,7 @@ dist:
   backend               : nccl
   uses_unique_world_seed: true
   dtype                 : float16
+  cpu_offload           : null
 logging:
   directory : experiments/logs
   prefix    : fsdp
