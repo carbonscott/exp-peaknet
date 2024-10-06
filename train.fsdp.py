@@ -96,6 +96,7 @@ from torch.distributed.fsdp import (
     MixedPrecision,
     ShardingStrategy,
     BackwardPrefetch,
+    CPUOffload,
 )
 
 # --- Policy wrapper
@@ -237,6 +238,7 @@ dist_config            = config.get("dist")
 dist_backend           = dist_config.get("backend")
 uses_unique_world_seed = dist_config.get("uses_unique_world_seed")
 dist_dtype             = dist_config.get("dtype")
+cpu_offload            = dist_config.get("cpu_offload")
 
 # -- Logging
 logging_config = config.get("logging")
@@ -590,6 +592,7 @@ if uses_dist:
         forward_prefetch  = True,
         sharding_strategy = sharding_strategy,
         limit_all_gathers = True,
+        cpu_offload       = None if cpu_offload is None else CPUOffload(offload_params=cpu_offload),
         use_orig_params   = False,
         device_id         = device,
     )
@@ -763,14 +766,14 @@ def estimate_loss(
         if dist_rank == 0:
             logger.debug(f"[RANK {dist_rank}] EVAL - Pre fetching mini_batch {enum_idx}")
 
-        # Create dummy data for a None batch
-        # FIXME: Better data cleaning will eliminate None batch
-        if batch_data is None:
-            logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
-            batch_input  = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
-            batch_target = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
-            none_mask[enum_idx] = 1
-            batch_data = (batch_input, batch_target)
+        ## # Create dummy data for a None batch
+        ## # FIXME: Better data cleaning will eliminate None batch
+        ## if batch_data is None:
+        ##     logger.debug(f"[RANK {dist_rank}] Found None batch at batch idx {enum_idx}.  Creating a dummy input!!!")
+        ##     batch_input  = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
+        ##     batch_target = torch.zeros(dummy_input_shape, dtype = mixed_precision_dtype)
+        ##     none_mask[enum_idx] = 1
+        ##     batch_data = (batch_input, batch_target)
 
         # -- Optional batch data transforms on GPUs to improve mfu
         # Concat data to perform the identical transform on input and target
