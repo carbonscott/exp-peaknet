@@ -1,27 +1,33 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-NUM_MPI_TASKS=4
+NUM_MPI_TASKS=10
 
-JOB=test-huge-1.0
-FOCAL_ALPHA="[0.25, 0.75]"
-FOCAL_GAMMA=2
+JOB=s3df-pretrain-huge-2.0
 BATCH_SIZE=1
 H_PAD=1920
 W_PAD=1920
-NUM_WORKERS=2
+NUM_WORKERS=1
 USES_PAD=true
 USES_POLAR_CENTER_CROP=false
 USES_BATCH_SAMPLER=false
 USES_RANDOM_PATCH=false
 USES_RANDOM_ROTATE=false
 USES_RANDOM_SHIFT=false
-PATH_CHKPT_PREV=null
-PREEEMPT_CHKPT_SAVING_ITERATIONS=20
+PATH_CHKPT_PREV="experiments/chkpts/huge-0.1.2024_0815_2113_41.preempt"
+PREEEMPT_CHKPT_SAVING_ITERATIONS=10
 CHKPT_SAVING_ITERATIONS=20
 GRAD_ACCUM_STEPS=20
 WARMUP=20
 SHARDING_STAGE="zero3"
+
+# [PRETRAIN LOSS]
+FOCAL_ALPHA="[0.25, 0.75]"
+FOCAL_GAMMA=2
+
+# [DATASET]
+PATH_TRAIN="pretrain/train.csv"
+PATH_EVAL="pretrain/eval.csv"
 
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
@@ -34,13 +40,13 @@ job=$JOB \
 auto_submit=false \
 sbatch_config.trainer=train.fsdp.py \
 train_config.checkpoint.prefix=$JOB \
-train_config.checkpoint.path_chkpt_prev=$PATH_CHKPT_PREV \
+"train_config.checkpoint.path_chkpt_prev=$PATH_CHKPT_PREV" \
 train_config.checkpoint.state_dict_type=full \
 train_config.checkpoint.preempt_metadata_path=$PREEMPT_METADATA_PATH \
 train_config.checkpoint.preempt_chkpt_saving_iterations=$PREEEMPT_CHKPT_SAVING_ITERATIONS \
 train_config.checkpoint.chkpt_saving_iterations=$CHKPT_SAVING_ITERATIONS \
-train_config.dataset.path_train=train.csv \
-train_config.dataset.path_eval=eval.csv \
+"train_config.dataset.path_train=$PATH_TRAIN" \
+"train_config.dataset.path_eval=$PATH_EVAL" \
 train_config.dataset.num_workers=$NUM_WORKERS \
 train_config.dataset.prefetch_factor=10 \
 train_config.dataset.pin_memory=true \
@@ -75,7 +81,7 @@ train_config.lr_scheduler.total_iterations=3200 \
 train_config.logging.prefix=$JOB \
 train_config.dist.dtype=bfloat16
 
-base_command="mpirun -n $NUM_MPI_TASKS --map-by ppr:4:node --bind-to none python train.fsdp.py experiments/yaml/$JOB.yaml"
+base_command="mpirun -n $NUM_MPI_TASKS --map-by ppr:${NUM_MPI_TASKS}:node --bind-to none python train.fsdp.py experiments/yaml/$JOB.yaml"
 final_command="OMP_NUM_THREADS=1 "
 
 if [ $RUNS_NSYS -eq 1 ]; then
