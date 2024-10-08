@@ -792,7 +792,7 @@ if from_resume:
                     f"loss min = {loss_min}, "
                     f"mse loss min = {mse_loss}, "
                     f"kl loss min = {kl_loss}, "
-                    f"kl loss min = {focal_loss}")
+                    f"focal loss min = {focal_loss}")
 
 
 # ----------------------------------------------------------------------- #
