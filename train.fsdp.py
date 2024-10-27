@@ -157,6 +157,8 @@ chkpt_saving_iterations         = chkpt_config.get("chkpt_saving_iterations")
 preempt_metadata_path           = chkpt_config.get("preempt_metadata_path", os.environ.get('PREEMPT_METADATA_PATH', None))
 preempt_chkpt_saving_iterations = chkpt_config.get("preempt_chkpt_saving_iterations")
 state_dict_type                 = chkpt_config.get("state_dict_type")
+chkpt_offload_to_cpu            = chkpt_config.get("offload_to_cpu")
+chkpt_rank0_only                = chkpt_config.get("rank0_only")
 
 # -- Dataset
 dataset_config         = config.get("dataset")
@@ -491,7 +493,7 @@ checkpoint_func = {
     "full"    : FullStateDictCheckpoint,
     "sharded" : ShardedStateDictCheckpoint,
 }[state_dict_type] if uses_dist else Checkpoint
-checkpointer = checkpoint_func()
+checkpointer = checkpoint_func(offload_to_cpu=chkpt_offload_to_cpu, rank0_only=chkpt_rank0_only)
 from_resume = path_chkpt_prev is not None
 
 # ----------------------------------------------------------------------- #

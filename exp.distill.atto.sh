@@ -3,7 +3,17 @@
 RUNS_NSYS=0
 NUM_MPI_TASKS=10
 
-JOB=s3df-distill-atto-1.1
+# [SLURM]
+JOB=s3df-distill-atto-4.0
+NUM_NODES=4
+NUM_TASKS=40
+NUM_GPUS_PER_NODE=10
+NUM_CPUS_PER_TASK=2
+TRAINER='train.distill.py'
+PARTITION=ada
+WALLTIME=12:00:00
+
+# [TRAIN]
 BATCH_SIZE=4
 H_PAD=1920
 W_PAD=1920
@@ -19,20 +29,23 @@ PREEEMPT_CHKPT_SAVING_ITERATIONS=10
 CHKPT_SAVING_ITERATIONS=20
 GRAD_ACCUM_STEPS=10
 WARMUP=20
-SHARDING_STAGE="zero3"
+SHARDING_STAGE="zero0"
+OFFLOAD_TO_CPU=false
 
 # [KNOWLEDGE DISTILLATION]
-TEMPERATURE=1.0
+TEMPERATURE=2.0
 FOCAL_ALPHA="[0.25, 0.75]"
 FOCAL_GAMMA=2
 LAM_MSE=0.4
 LAM_KL=0.4
 LAM_FOCAL=0.2
-EMA_MOMENTUM=0.9
+EMA_MOMENTUM=null
 
 # [DATASET]
-PATH_TRAIN="distill/mfxl1025422.train.csv"
-PATH_EVAL="distill/mfxl1025422.eval.csv"
+## PATH_TRAIN="distill/mfxl1025422.train.csv"
+## PATH_EVAL="distill/mfxl1025422.eval.csv"
+PATH_TRAIN="distill/train.csv"
+PATH_EVAL="distill/eval.csv"
 
 PREEMPT_ROOT="preempt"
 mkdir -p $PREEMPT_ROOT
@@ -42,14 +55,21 @@ SEG_SIZE=$((BATCH_SIZE * 60))
 
 python launch_job.distill.py \
 job=$JOB \
-auto_submit=false \
-sbatch_config.trainer=train.distill.py \
+auto_submit=true \
+sbatch_config.trainer=$TRAINER \
+sbatch_config.num_nodes=$NUM_NODES \
+sbatch_config.num_tasks=$NUM_TASKS \
+sbatch_config.partition=$PARTITION \
+sbatch_config.walltime=$WALLTIME \
+sbatch_config.num_gpus_per_node=$NUM_GPUS_PER_NODE \
+sbatch_config.num_cpus_per_task=$NUM_CPUS_PER_TASK \
 distill_config.checkpoint.prefix=$JOB \
 distill_config.checkpoint.path_chkpt_prev=$PATH_CHKPT_PREV \
 distill_config.checkpoint.state_dict_type=full \
 distill_config.checkpoint.preempt_metadata_path=$PREEMPT_METADATA_PATH \
 distill_config.checkpoint.preempt_chkpt_saving_iterations=$PREEEMPT_CHKPT_SAVING_ITERATIONS \
 distill_config.checkpoint.chkpt_saving_iterations=$CHKPT_SAVING_ITERATIONS \
+distill_config.checkpoint.offload_to_cpu=$OFFLOAD_TO_CPU \
 "distill_config.dataset.path_train=$PATH_TRAIN" \
 "distill_config.dataset.path_eval=$PATH_EVAL" \
 distill_config.dataset.num_workers=$NUM_WORKERS \
@@ -101,4 +121,4 @@ if [ $RUNS_NSYS -eq 1 ]; then
 fi
 final_command+="$base_command"
 
-eval $final_command
+## eval $final_command
