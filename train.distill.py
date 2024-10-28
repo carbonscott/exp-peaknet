@@ -322,7 +322,7 @@ memmax = MemoryMaximizer() if dist_local_rank == 0 else None
 sharding_strategy = dict(
     zero3 = ShardingStrategy.FULL_SHARD,
     zero2 = ShardingStrategy.SHARD_GRAD_OP,
-    zero0 = ShardingStrategy.NO_SHARD,
+    ## zero0 = ShardingStrategy.NO_SHARD,  # [ERROR] No Shard causes checkpointing issue
 )[sharding_stage]
 
 # --- Wrapping strategy
@@ -495,10 +495,10 @@ custom_collate = None
 #  CHECKPOINT PRE FSDP
 # ----------------------------------------------------------------------- #
 checkpoint_func = {
-    "full"    : FullStateDictCheckpoint,
-    "sharded" : ShardedStateDictCheckpoint,
+    "full"    : partial(FullStateDictCheckpoint, offload_to_cpu=chkpt_offload_to_cpu, rank0_only=chkpt_rank0_only),
+    "sharded" : partial(ShardedStateDictCheckpoint, offload_to_cpu=chkpt_offload_to_cpu),
 }[state_dict_type] if uses_dist else Checkpoint
-checkpointer = checkpoint_func(offload_to_cpu=chkpt_offload_to_cpu, rank0_only=chkpt_rank0_only)
+checkpointer = checkpoint_func()
 from_resume = path_chkpt_prev is not None
 
 # ----------------------------------------------------------------------- #
@@ -560,7 +560,8 @@ if dist_rank == 0:
     logger.debug(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
 if from_resume:
-    if isinstance(checkpointer, checkpoint_func):
+    checkpoint_func_orig = checkpoint_func.func if hasattr(checkpoint_func, 'func') else checkpoint_func
+    if isinstance(checkpointer, checkpoint_func_orig):
         checkpointer.pre_fsdp_load(dist_rank, model, path_chkpt_prev)
 
 # -- Mixed precision
@@ -775,7 +776,8 @@ iter_state = dict(
 last_epoch = 0
 last_seg   = -1
 if from_resume:
-    if isinstance(checkpointer, checkpoint_func):
+    checkpoint_func_orig = checkpoint_func.func if hasattr(checkpoint_func, 'func') else checkpoint_func
+    if isinstance(checkpointer, checkpoint_func_orig):
         # Optimizer, scheduler are loaded
         checkpointer.post_fsdp_load(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt_prev)
 
