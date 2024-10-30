@@ -10,6 +10,9 @@
 #SBATCH --nodes={{ num_nodes }}
 #SBATCH --ntasks={{ num_tasks }}
 #SBATCH --cpus-per-task={{ num_cpus_per_task }}
+{%- if exclude_nodes %}
+#SBATCH --exclude={{ exclude_nodes }}
+{%- endif %}
 
 # Set up the Huggingface's cache directory
 export TRANSFORMERS_CACHE={{ transformers_cache }}
