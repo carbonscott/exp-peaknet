@@ -12,7 +12,8 @@ NUM_CPUS_PER_TASK=2
 TRAINER='train.distill.py'
 PARTITION=ada
 WALLTIME=12:00:00
-EXCLUDE_NODES="sdfada005"
+EXCLUDE_NODES="sdfada005,sdfada006"
+QOS="preemptable"
 
 # [TRAIN]
 BATCH_SIZE=4
@@ -66,7 +67,8 @@ sbatch_config.partition=$PARTITION \
 sbatch_config.walltime=$WALLTIME \
 sbatch_config.num_gpus_per_node=$NUM_GPUS_PER_NODE \
 sbatch_config.num_cpus_per_task=$NUM_CPUS_PER_TASK \
-sbatch_config.exclude_nodes=$EXCLUDE_NODES \
+"sbatch_config.exclude_nodes='$EXCLUDE_NODES'" \
+sbatch_config.qos=$QOS \
 distill_config.checkpoint.prefix=$JOB \
 distill_config.checkpoint.path_chkpt_prev=$PATH_CHKPT_PREV \
 distill_config.checkpoint.state_dict_type=full \

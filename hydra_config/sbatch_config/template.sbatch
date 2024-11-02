@@ -13,6 +13,9 @@
 {%- if exclude_nodes %}
 #SBATCH --exclude={{ exclude_nodes }}
 {%- endif %}
+{%- if qos %}
+#SBATCH --qos={{ qos }}
+{%- endif %}
 
 # Set up the Huggingface's cache directory
 export TRANSFORMERS_CACHE={{ transformers_cache }}
