@@ -80,7 +80,7 @@ EOF
 )
 
 ###################
-# Let's go BURR!!!
+# Let's go BRRR!!!
 ###################
 # Start Ray on head node
 echo "Starting Ray on $HEAD_NODE..."

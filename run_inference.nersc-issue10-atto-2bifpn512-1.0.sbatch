@@ -23,4 +23,4 @@ echo "WORKER_NODES=$WORKER_NODES" >> node_info.txt
 set -x
 
 # Launch the job coordinator script
-bash run_inference.nersc-issue10-atto-2bifpn512-1.0.launch.sh
+bash run_inference.nersc-issue10-atto-2bifpn512-1.0.sh
