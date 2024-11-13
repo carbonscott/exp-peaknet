@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH --output=slurm/%j.log    # File to which STDOUT will be written, %j inserts jobid
-#SBATCH --error=slurm/%j.err     # File to which STDERR will be written, %j inserts jobid
+#SBATCH --output=slurm/{{ job }}.%j.log    # File to which STDOUT will be written, %j inserts jobid
+#SBATCH --error=slurm/{{ job }}.%j.err     # File to which STDERR will be written, %j inserts jobid
 #SBATCH --account lcls:prjdat21         # Check it in your Iris portal: https://iris.nersc.gov
 #SBATCH --partition={{partition}}
 #SBATCH --time {{ walltime }}          # Regular only allows a max of 12 hours.  See https://docs.nersc.gov/jobs/policy/

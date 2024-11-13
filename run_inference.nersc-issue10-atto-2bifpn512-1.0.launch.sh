@@ -13,7 +13,7 @@ set -x
 # Environment setup
 ###################
 # Setup
-SETUP_CMD=$(cat << 'EOF'
+SETUP_CMD=$(cat << EOF
 echo 'Loading ana-py3...' &&
 source /sdf/group/lcls/ds/ana/sw/conda1/manage/bin/psconda.sh &&
 echo 'Loading ml.cong...' &&
@@ -23,7 +23,7 @@ EOF
 )
 
 # Define Ray start command
-RAY_HEAD_CMD=$(cat << 'EOF'
+RAY_HEAD_CMD=$(cat << EOF
 ray start --head \
     --node-ip-address=127.0.0.1 \
     --port=6379 \
@@ -31,7 +31,7 @@ ray start --head \
     --disable-usage-stats
 EOF
 )
-RAY_WORKER_CMD=$(cat << 'EOF'
+RAY_WORKER_CMD=$(cat << EOF
 ray start \
     --address='${HEAD_IP}:6379' \
     --num-cpus=2
@@ -107,11 +107,13 @@ JOB1_PID=$!
 sleep 30
 
 # Launch Job2 across both nodes
+# Initialize an array for all Job2 PIDs (head and workers)
+declare -a JOB2_PIDS=()
 echo "Starting Job2 across nodes..."
 for node in $HEAD_NODE $WORKER_NODES; do
     ssh $node "$SETUP_CMD && $JOB2_CMD &> 'inference_log/peaknet-pipeline-mpi.nersc-atto-2bifpn512-1.0.${node}.log'" &
+    JOB2_PIDS+=($!)
 done
-JOB2_PID=$!
 
 # Wait for 60 seconds for Job2 to initialize
 sleep 60
@@ -122,6 +124,6 @@ ssh $HEAD_NODE "$SETUP_CMD && $JOB3_CMD &> inference_log/peaknet-pipeline-write-
 JOB3_PID=$!
 
 # Wait for all jobs to complete
-wait $JOB1_PID $JOB2_PID $JOB3_PID
+wait $JOB1_PID ${JOB2_PIDS[@]} $JOB3_PID
 
 echo "All jobs completed"
