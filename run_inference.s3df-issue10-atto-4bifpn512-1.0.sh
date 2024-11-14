@@ -40,13 +40,14 @@ EOF
 
 # Define MPI commands
 JOB1_CMD=$(cat << EOF
-mpirun -n 20 psana-ray-producer \
+mpirun -n 10 psana-ray-producer \
     --exp mfxl1038923 \
     --run 278 \
     --detector_name epix10k2M \
     --queue_size 1000 \
     --ray_namespace my \
     --queue_name input \
+    --num_consumers 20 \
     --uses_bad_pixel_mask True \
     --manual_mask_path manual_mask.npy
 EOF
@@ -63,6 +64,7 @@ mpirun -n 10 peaknet-pipeline-mpi \
     --output_queue_name peak_queue \
     --output_queue_size 100 \
     --input_queue_name input \
+    --num_consumers 1 \
     --ray_namespace my
 EOF
 )
