@@ -55,10 +55,10 @@ EOF
 
 JOB2_CMD=$(cat << EOF
 mpirun -n 10 peaknet-pipeline-mpi \
-    --batch_size 2 \
+    --batch_size 4 \
     --num_workers 1 \
-    --config_path configs/peaknet-673m.yaml \
-    --weights_path weights/peaknet-673m.bin \
+    --config_path configs/s3df-issue10-tiny-4bifpn512-1.0.yaml \
+    --weights_path weights/s3df-issue10-tiny-4bifpn512-1.0.bin \
     --dtype bfloat16 \
     --accumulation_steps 10 \
     --output_queue_name peak_queue \
@@ -67,7 +67,7 @@ mpirun -n 10 peaknet-pipeline-mpi \
     --num_consumers 1 \
     --ray_namespace my \
     --compile \
-    --warmup_batch_sizes 2 1
+    --warmup_batch_sizes 4 3 2 1
 EOF
 )
 
@@ -76,7 +76,7 @@ mpirun -n 10 peaknet-pipeline-write-to-cxi \
     --queue_name peak_queue \
     --ray_namespace my \
     --output_dir cxi_output \
-    --basename teacher \
+    --basename s3df-issue10-tiny-4bifpn512-1.0 \
     --save_every 2 \
     --min_num_peak 15 \
     --geom_file geom/epix10ka2M-r0138-stream.geom.stream
@@ -104,7 +104,7 @@ sleep 10
 
 # Launch Job1 on head node
 echo "Starting Job1 on $HEAD_NODE..."
-ssh $HEAD_NODE "$SETUP_CMD && $JOB1_CMD &> inference_log/psana-ray-producer.teacher.log" &
+ssh $HEAD_NODE "$SETUP_CMD && $JOB1_CMD &> inference_log/psana-ray-producer.s3df-tiny-4bifpn512-1.0.log" &
 JOB1_PID=$!
 
 # Wait for 30 seconds for Job1 to initialize
@@ -115,7 +115,7 @@ sleep 30
 declare -a JOB2_PIDS=()
 echo "Starting Job2 across nodes..."
 for node in $HEAD_NODE $WORKER_NODES; do
-    ssh $node "$SETUP_CMD && $JOB2_CMD &> 'inference_log/peaknet-pipeline-mpi.teacher.${node}.log'" &
+    ssh $node "$SETUP_CMD && $JOB2_CMD &> 'inference_log/peaknet-pipeline-mpi.s3df-tiny-4bifpn512-1.0.${node}.log'" &
     JOB2_PIDS+=($!)
 done
 
@@ -124,7 +124,7 @@ sleep 60
 
 # Launch Job3 on head node
 echo "Starting Job3 on $HEAD_NODE..."
-ssh $HEAD_NODE "$SETUP_CMD && $JOB3_CMD &> inference_log/peaknet-pipeline-write-to-cxi.teacher.log" &
+ssh $HEAD_NODE "$SETUP_CMD && $JOB3_CMD &> inference_log/peaknet-pipeline-write-to-cxi.s3df-tiny-4bifpn512-1.0.log" &
 JOB3_PID=$!
 
 # Wait for all jobs to complete

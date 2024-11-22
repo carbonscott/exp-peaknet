@@ -5,8 +5,8 @@
 #SBATCH --gpus-per-node=10
 #SBATCH --time=04:00:00
 #SBATCH --exclusive
-#SBATCH --output=slurm/inference-teacher.%j.log
-#SBATCH --error=slurm/inference-teacher.%j.err
+#SBATCH --output=slurm/inference-s3df-issue10-tiny-4bifpn512-1.0.%j.log
+#SBATCH --error=slurm/inference-s3df-issue10-tiny-4bifpn512-1.0.%j.err
 
 conda.ml
 cd /sdf/data/lcls/ds/prj/prjcwang31/results/proj-peaknet
@@ -23,4 +23,4 @@ echo "WORKER_NODES=$WORKER_NODES" >> node_info.txt
 set -x
 
 # Launch the job coordinator script
-bash run_inference.teacher.sh
+bash run_inference.s3df-issue10-tiny-4bifpn512-1.0.sh
