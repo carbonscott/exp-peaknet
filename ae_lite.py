@@ -348,10 +348,10 @@ class ViTAutoencoder(nn.Module):
 
 model = ViTAutoencoder(
     image_size=(1920, 1920),
-    patch_size=60,
+    patch_size=64,
     latent_dim=128,
     dim=256,
-    depth=6,
+    depth=4,
     use_flash=True,
 )
 logger.info(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
@@ -375,7 +375,7 @@ optimizer = optim.AdamW(param_iter, **optim_arg_dict)
 # -- Dataset
 zarr_path = 'peaknet10k/mfxl1025422_r0313_peaknet.0031.zarr'
 z_store = zarr.open(zarr_path, mode='r')
-batch_size = 1
+batch_size = 64
 
 # -- Device
 device = f'cuda:0' if torch.cuda.is_available() else 'cpu'
