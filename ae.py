@@ -20,6 +20,9 @@ from functools  import partial
 from contextlib import nullcontext
 from datetime   import timedelta
 
+import math
+from einops import rearrange, repeat
+
 # -- peaknet specific imports
 # --- Dataset
 from peaknet.datasets.segmented_zarr_dataset import (
@@ -273,38 +276,6 @@ memmax = MemoryMaximizer() if dist_local_rank == 0 else None
 
 
 # ----------------------------------------------------------------------- #
-#  FSDP SETUP
-# ----------------------------------------------------------------------- #
-# -- FSDP policy
-# --- Sharding strategy
-sharding_strategy = dict(
-    zero3 = ShardingStrategy.FULL_SHARD,
-    zero2 = ShardingStrategy.SHARD_GRAD_OP,
-    zero0 = ShardingStrategy.NO_SHARD,
-)[sharding_stage]
-
-# --- Wrapping strategy
-# ---- Use built-in transformer wrap policy
-auto_wrap_policy = None
-## auto_wrap_policy = partial(
-##     transformer_auto_wrap_policy,
-##     transformer_layer_cls={
-##         nn.Linear,
-##     },
-## )
-
-# --- Activation checkpointing
-non_reentrant_wrapper = partial(
-    checkpoint_wrapper,
-    ## offload_to_cpu  = False,
-    checkpoint_impl = CheckpointImpl.NO_REENTRANT,
-)
-
-# --- Backward prefetch policy
-backward_prefetch = BackwardPrefetch.BACKWARD_PRE
-
-
-# ----------------------------------------------------------------------- #
 #  TF32 support
 # ----------------------------------------------------------------------- #
 # Ampere architecture (capability_major = 8) is required.
@@ -461,17 +432,231 @@ class LinearAE(nn.Module):
         with torch.no_grad():
             self.decoder.weight.copy_(self.encoder.weight.t())
 
+class MultiHeadAttention(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, use_flash=False):
+        super().__init__()
+        self.heads = heads
+        self.dim_head = dim_head
+        inner_dim = dim_head * heads
+        self.use_flash = use_flash
+
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
+        self.to_out = nn.Linear(inner_dim, dim, bias=False)
+
+    def forward(self, x):
+        b, n, d = x.shape
+        h = self.heads
+
+        # Project to q, k, v
+        qkv = rearrange(self.to_qkv(x), 'b n (three h d) -> three b h n d', three=3, h=h)
+        q, k, v = qkv
+
+        if self.use_flash:
+            # Flash attention implementation
+            with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                attn_output = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        else:
+            # Regular attention
+            dots = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.dim_head)
+            attn = dots.softmax(dim=-1)
+            attn_output = torch.matmul(attn, v)
+
+        # Merge heads and project
+        out = rearrange(attn_output, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, use_flash=False):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(dim)
+        self.attn = MultiHeadAttention(dim, heads, dim_head, use_flash=use_flash)
+        self.ln2 = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, dim * 4, bias=False),
+            nn.GELU(),
+            nn.Linear(dim * 4, dim, bias=False)
+        )
+
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ff(self.ln2(x))
+        return x
+
+class TransformerEncoder(nn.Module):
+    def __init__(self, dim, depth, heads=8, dim_head=64, use_flash=False):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            TransformerBlock(dim, heads, dim_head, use_flash=use_flash) for _ in range(depth)
+        ])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+class TransformerDecoder(nn.Module):
+    def __init__(self, dim, depth, heads=8, dim_head=64, use_flash=False):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            TransformerBlock(dim, heads, dim_head, use_flash=False) for _ in range(depth)
+        ])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+class ViTAutoencoder(nn.Module):
+    def __init__(
+        self,
+        image_size=(1920, 1920),
+        patch_size=32,
+        latent_dim=256,
+        dim=512,
+        depth=6,
+        heads=8,
+        dim_head=64,
+        use_flash=False
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.image_size = image_size
+
+        # Calculate patches
+        self.num_patches = (image_size[0] // patch_size) * (image_size[1] // patch_size)
+        patch_dim = 1 * patch_size * patch_size
+
+        # Encoder components
+        self.patch_embed = nn.Sequential(
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim, bias=False),
+            nn.LayerNorm(dim)
+        )
+
+        # Learnable position embeddings
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
+
+        # Transformer encoder
+        self.encoder = TransformerEncoder(dim, depth, heads, dim_head, use_flash)
+
+        # Projection to latent space
+        self.to_latent = nn.Linear(dim * self.num_patches, latent_dim, bias=False)
+
+        # Decoder components
+        self.from_latent = nn.Linear(latent_dim, dim * self.num_patches, bias=False)
+
+        # Transformer decoder
+        self.decoder = TransformerDecoder(dim, depth, heads, dim_head, use_flash)
+
+        # Patch reconstruction
+        self.to_pixels = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, patch_dim, bias=False)
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        def init_ortho(m):
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight)
+
+        self.apply(init_ortho)
+
+        # Initialize decoder projection as transpose of encoder
+        with torch.no_grad():
+            self.from_latent.weight.copy_(self.to_latent.weight.t())
+
+    def encode(self, x):
+        # Convert image to patches
+        patches = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size)
+
+        # Patch embedding
+        tokens = self.patch_embed(patches)
+
+        # Add positional embedding
+        tokens = tokens + self.pos_embedding
+
+        # Transformer encoding
+        encoded = self.encoder(tokens)
+
+        # Project to latent space
+        latent = self.to_latent(rearrange(encoded, 'b n d -> b (n d)'))
+        return latent
+
+    def decode(self, z):
+        # Project from latent space
+        x = self.from_latent(z)
+        x = rearrange(x, 'b (n d) -> b n d', n=self.num_patches)
+
+        # Transformer decoding
+        x = self.decoder(x)
+
+        # Reconstruct patches
+        patches = self.to_pixels(x)
+
+        # Convert patches back to image
+        h_patches = w_patches = int(math.sqrt(self.num_patches))
+        imgs = rearrange(patches, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
+                         h=h_patches, w=w_patches, p1=self.patch_size, p2=self.patch_size)
+        return imgs
+
+    def forward(self, x):
+        z = self.encode(x)
+        return self.decode(z)
+
 logger.debug(f'[RANK {dist_rank}] Configuring model...')
-input_dim = H_pad*W_pad
-model = LinearAE(input_dim, hidden_dim)
+## input_dim = H_pad*W_pad
+## model = LinearAE(input_dim, hidden_dim)
+
+model = ViTAutoencoder(
+    image_size=(1920, 1920),
+    patch_size=60,
+    latent_dim=128,
+    dim=256,
+    depth=4,
+    use_flash=True,
+)
 logger.debug(f'[RANK {dist_rank}] Done instantiating model...')
 if not uses_dist: model.to(device)
 
 if dist_rank == 0:
     logger.debug(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
+# ----------------------------------------------------------------------- #
+#  FSDP SETUP
+# ----------------------------------------------------------------------- #
+# -- FSDP policy
+# --- Sharding strategy
+sharding_strategy = dict(
+    zero3 = ShardingStrategy.FULL_SHARD,
+    zero2 = ShardingStrategy.SHARD_GRAD_OP,
+    zero0 = ShardingStrategy.NO_SHARD,
+)[sharding_stage]
+
+# --- Wrapping strategy
+# ---- Use built-in transformer wrap policy
+## auto_wrap_policy = None
+auto_wrap_policy = partial(
+    transformer_auto_wrap_policy,
+    transformer_layer_cls={
+        TransformerBlock,
+    },
+)
+
+# --- Activation checkpointing
+non_reentrant_wrapper = partial(
+    checkpoint_wrapper,
+    ## offload_to_cpu  = False,
+    checkpoint_impl = CheckpointImpl.NO_REENTRANT,
+)
+
+# --- Backward prefetch policy
+backward_prefetch = BackwardPrefetch.BACKWARD_PRE
+
 if from_resume:
-    if isinstance(checkpointer, checkpoint_func):
+    checkpoint_func_orig = checkpoint_func.func if hasattr(checkpoint_func, 'func') else checkpoint_func
+    if isinstance(checkpointer, checkpoint_func_orig):
         checkpointer.pre_fsdp_load(dist_rank, model, path_chkpt_prev)
 
 # -- Mixed precision
@@ -581,7 +766,8 @@ iter_state = dict(
 last_epoch = 0
 last_seg   = -1
 if from_resume:
-    if isinstance(checkpointer, checkpoint_func):
+    checkpoint_func_orig = checkpoint_func.func if hasattr(checkpoint_func, 'func') else checkpoint_func
+    if isinstance(checkpointer, checkpoint_func_orig):
         # Optimizer, scheduler are loaded
         checkpointer.post_fsdp_load(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt_prev)
 
