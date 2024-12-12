@@ -853,7 +853,7 @@ def estimate_loss(
 
         # Optional transform
         if transforms is not None:
-            for enum_idx, trans in enumerate(transforms):
+            for _, trans in enumerate(transforms):
                 batch_data = trans(batch_data)
 
         # Unpack vars
@@ -903,6 +903,7 @@ def estimate_loss(
             path_data_dump = os.path.join(dir_data_dump, f'{fl_log_prefix}.epoch{epoch}_seg{seg}_minib{mini_batch}.loop.pt')
             torch.save(data_dump, path_data_dump)
 
+        logger.debug(f"enum_idx={enum_idx}, len(losses)={len(losses)}")
         losses     [enum_idx] = loss
         num_samples[enum_idx] = len(batch_input)
         proc_masks [enum_idx] = 1
@@ -1373,59 +1374,59 @@ try:
                             logger.debug(f'[RANK {dist_rank}] Start evaluation...')
 
                         # ---- - Eval
-                        # ---- -- Train
-                        # Get a random subset of the training set
-                        train_loss = torch.tensor(float('nan'))
-                        num_eval_retry = 0
-                        while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
-                            dataset_eval_train.reset()
-                            high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
-                            rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                            dataset_eval_train.set_start_idx(rand_start_idx)
+                        ## # ---- -- Train
+                        ## # Get a random subset of the training set
+                        ## train_loss = torch.tensor(float('nan'))
+                        ## num_eval_retry = 0
+                        ## while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
+                        ##     dataset_eval_train.reset()
+                        ##     high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
+                        ##     rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
+                        ##     dataset_eval_train.set_start_idx(rand_start_idx)
 
-                            sampler_eval = torch.utils.data.DistributedSampler(
-                                dataset_eval_train,
-                                shuffle   = True,
-                                seed      = base_seed,
-                                drop_last = drop_last_in_sampler,
-                            ) if uses_dist else None
-                            dataloader_eval = torch.utils.data.DataLoader(
-                                dataset_eval_train,
-                                batch_size      = batch_size,
-                                sampler         = sampler_eval,
-                                num_workers     = num_workers,
-                                shuffle         = False,
-                                collate_fn      = custom_collate,
-                                drop_last       = drop_last_in_loader,
-                                pin_memory      = pin_memory,
-                                prefetch_factor = prefetch_factor,
-                            )
+                        ##     sampler_eval = torch.utils.data.DistributedSampler(
+                        ##         dataset_eval_train,
+                        ##         shuffle   = True,
+                        ##         seed      = base_seed,
+                        ##         drop_last = drop_last_in_sampler,
+                        ##     ) if uses_dist else None
+                        ##     dataloader_eval = torch.utils.data.DataLoader(
+                        ##         dataset_eval_train,
+                        ##         batch_size      = batch_size,
+                        ##         sampler         = sampler_eval,
+                        ##         num_workers     = num_workers,
+                        ##         shuffle         = False,
+                        ##         collate_fn      = custom_collate,
+                        ##         drop_last       = drop_last_in_loader,
+                        ##         pin_memory      = pin_memory,
+                        ##         prefetch_factor = prefetch_factor,
+                        ##     )
 
-                            # Shuffle the training example
-                            if uses_dist:
-                                sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
+                        ##     # Shuffle the training example
+                        ##     if uses_dist:
+                        ##         sampler_eval.set_epoch(rand_start_idx)  # Any integer is fine
 
-                            # Get loss
-                            train_loss = estimate_loss(
-                                dataloader_eval,
-                                model,
-                                criterion,
-                                autocast_context,
-                                max_iter              = max_eval_iter,
-                                desc                  = '(training set)',
-                                device                = device,
-                                dummy_input_shape     = batch_input_shape,
-                                mixed_precision_dtype = mixed_precision_dtype,
-                                transforms            = transforms,
-                                **data_dump_timestamp,
-                            )
-                            num_eval_retry += 1
+                        ##     # Get loss
+                        ##     train_loss = estimate_loss(
+                        ##         dataloader_eval,
+                        ##         model,
+                        ##         criterion,
+                        ##         autocast_context,
+                        ##         max_iter              = max_eval_iter,
+                        ##         desc                  = '(training set)',
+                        ##         device                = device,
+                        ##         dummy_input_shape     = batch_input_shape,
+                        ##         mixed_precision_dtype = mixed_precision_dtype,
+                        ##         transforms            = transforms,
+                        ##         **data_dump_timestamp,
+                        ##     )
+                        ##     num_eval_retry += 1
 
-                        # Log the train loss
-                        if dist_rank == 0:
-                            seg_start_idx = dataset_eval_train.start_idx
-                            seg_end_idx   = dataset_eval_train.end_idx
-                            logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
+                        ## # Log the train loss
+                        ## if dist_rank == 0:
+                        ##     seg_start_idx = dataset_eval_train.start_idx
+                        ##     seg_end_idx   = dataset_eval_train.end_idx
+                        ##     logger.info(f"[RANK {dist_rank}] LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
 
                         # ---- -- Validation
                         # Get a random subset of the validation set
