@@ -18,6 +18,7 @@ from einops import rearrange, repeat
 from peaknet.tensor_transforms import (
     InstanceNorm,
 )
+from peaknet.utils.checkpoint import Checkpoint
 
 import logging
 logging.basicConfig(
@@ -288,7 +289,11 @@ class ViTAutoencoder(nn.Module):
         # Patch reconstruction
         self.to_pixels = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, patch_dim, bias=False)
+            nn.Linear(dim, dim * 2, bias=False),
+            nn.GELU(),
+            nn.Linear(dim * 2, dim * 4, bias=False),
+            nn.GELU(),
+            nn.Linear(dim * 4, patch_dim, bias=False)
         )
 
         self._init_weights()
@@ -348,25 +353,38 @@ class ViTAutoencoder(nn.Module):
 
 model = ViTAutoencoder(
     image_size=(1920, 1920),
-    patch_size=64,
-    latent_dim=128,
-    dim=256,
-    depth=4,
+    patch_size=128,
+    latent_dim=64,
+    dim=512,
+    depth=1,
     use_flash=True,
 )
 logger.info(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
 # -- Loss
-criterion = nn.MSELoss()
+## criterion = nn.MSELoss()
+criterion = nn.L1Loss()
 
 # -- Optim
-lr = 1e-3
+def cosine_decay(initial_lr: float, current_step: int, total_steps: int, final_lr: float = 0.0) -> float:
+    # Ensure we don't go past total steps
+    current_step = min(current_step, total_steps)
+
+    # Calculate cosine decay
+    cosine_decay = 0.5 * (1 + math.cos(math.pi * current_step / total_steps))
+
+    # Calculate decayed learning rate
+    decayed_lr = final_lr + (initial_lr - final_lr) * cosine_decay
+
+    return decayed_lr
+
+init_lr = 1e-3
 weight_decay = 0
 adam_beta1 = 0.9
 adam_beta2 = 0.999
 param_iter = model.parameters()
 optim_arg_dict = dict(
-    lr           = lr,
+    lr           = init_lr,
     weight_decay = weight_decay,
     betas        = (adam_beta1, adam_beta2),
 )
@@ -375,7 +393,7 @@ optimizer = optim.AdamW(param_iter, **optim_arg_dict)
 # -- Dataset
 zarr_path = 'peaknet10k/mfxl1025422_r0313_peaknet.0031.zarr'
 z_store = zarr.open(zarr_path, mode='r')
-batch_size = 64
+batch_size = 4
 
 # -- Device
 device = f'cuda:0' if torch.cuda.is_available() else 'cpu'
@@ -398,16 +416,33 @@ scaler = scaler_func(enabled=(dist_dtype == 'float16'))
 grad_clip = 1.0
 
 # --- Normlization
-normalizer = InstanceNorm()
+normalizer = InstanceNorm(scales_variance=True)
+
+# --- Checkpoint
+checkpointer = Checkpoint()
+path_chkpt = 'chkpt_ae_lite'
 
 # -- Trainig loop
 iteration_counter = 0
+total_iterations  = 500
+loss_min = float('inf')
 while True:
+    # Adjust learning rate
+    lr = cosine_decay(init_lr, iteration_counter, total_iterations*0.5, init_lr*1e-3)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
     batches = chunked(z_store['images'], batch_size)
     for enum_idx, batch in enumerate(batches):
+
         # Turn list of arrays into a single array with the batch dim
         batch = torch.from_numpy(np.stack(batch)).unsqueeze(1).to(device)
         batch = normalizer(batch)
+
+        batch[...,:10,:]=0
+        batch[...,-10:,:]=0
+        batch[...,:,:10]=0
+        batch[...,:,-10:]=0
 
         # Fwd/Bwd
         with autocast_context:
@@ -427,12 +462,20 @@ while True:
 
         # Log
         log_data = {
-            "logevent"           : "LOSS:TRAIN",
-            "iteration"          : iteration_counter,
-            "grad_norm"          : f"{grad_norm:.6f}",
-            "mean_train_loss"    : f"{loss:.6f}",
+            "logevent"        : "LOSS:TRAIN",
+            "iteration"       : iteration_counter,
+            "lr"              : f"{lr:06f}",
+            "grad_norm"       : f"{grad_norm:.6f}",
+            "mean_train_loss" : f"{loss:.6f}",
         }
         log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
         logger.info(log_msg)
 
         iteration_counter += 1
+
+    if iteration_counter > 0.2*total_iterations and loss_min > loss.item():
+        loss_min = loss.item()
+        checkpointer.save(0, model, optimizer, None, None, path_chkpt)
+    if iteration_counter > total_iterations:
+        break
+
