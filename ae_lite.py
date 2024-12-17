@@ -172,7 +172,8 @@ class ConvAE(nn.Module):
         # Convolutional decoding
         return self.decoder_conv(x)
 
-# --- VQ
+# VQVAE
+
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25):
         super().__init__()
@@ -184,14 +185,14 @@ class VectorQuantizer(nn.Module):
         self.embeddings = nn.Parameter(torch.randn(num_embeddings, embedding_dim))
         nn.init.xavier_uniform_(self.embeddings)
 
-        # Add EMA tracking for codebook updates
+        # EMA tracking for codebook updates
         self.register_buffer('_ema_cluster_size', torch.zeros(num_embeddings))
         self._ema_w = 0.99
         self._epsilon = 1e-5
         self.register_buffer('_ema_dw', torch.zeros((num_embeddings, embedding_dim)))
 
     def forward(self, x):
-        # Flatten input
+        # Reshape input to (batch * spatial_dim, embedding_dim)
         flat_x = x.reshape(-1, self.embedding_dim)
 
         # Calculate distances
@@ -209,20 +210,21 @@ class VectorQuantizer(nn.Module):
         # Reshape quantized values to match input shape
         quantized = quantized.reshape(x.shape)
 
-        # EMA codebook update
+        # EMA codebook update during training
         if self.training:
+            # Update cluster size
             self._ema_cluster_size = self._ema_cluster_size * self._ema_w + \
                                    (1 - self._ema_w) * torch.sum(encodings, dim=0)
 
-            # Laplace smoothing of the cluster size
+            # Laplace smoothing
             n = torch.sum(self._ema_cluster_size.data)
             self._ema_cluster_size = (
                 (self._ema_cluster_size + self._epsilon)
                 / (n + self.num_embeddings * self._epsilon) * n)
 
+            # Update embeddings
             dw = torch.matmul(encodings.t(), flat_x)
             self._ema_dw = self._ema_w * self._ema_dw + (1 - self._ema_w) * dw
-
             self.embeddings.data = self._ema_dw / self._ema_cluster_size.unsqueeze(1)
 
         # Loss
@@ -235,7 +237,6 @@ class VectorQuantizer(nn.Module):
 
         return quantized, loss, encoding_indices
 
-# --- Transformers
 class MultiHeadAttention(nn.Module):
     def __init__(self, dim, heads=8, dim_head=64, use_flash=False):
         super().__init__()
@@ -251,22 +252,18 @@ class MultiHeadAttention(nn.Module):
         b, n, d = x.shape
         h = self.heads
 
-        # Project to q, k, v
         qkv = rearrange(self.to_qkv(x), 'b n (three h d) -> three b h n d', three=3, h=h)
         q, k, v = qkv
 
         if self.use_flash:
-            # Flash attention implementation
             with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
-                attn_output = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+                out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
         else:
-            # Regular attention
             dots = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.dim_head)
             attn = dots.softmax(dim=-1)
-            attn_output = torch.matmul(attn, v)
+            out = torch.matmul(attn, v)
 
-        # Merge heads and project
-        out = rearrange(attn_output, 'b h n d -> b n (h d)')
+        out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
 class TransformerBlock(nn.Module):
@@ -282,32 +279,9 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x):
+        # Single residual connection per block
         x = x + self.attn(self.ln1(x))
         x = x + self.ff(self.ln2(x))
-        return x
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, dim, depth, heads=8, dim_head=64, use_flash=False):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            TransformerBlock(dim, heads, dim_head, use_flash=use_flash) for _ in range(depth)
-        ])
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-class TransformerDecoder(nn.Module):
-    def __init__(self, dim, depth, heads=8, dim_head=64, use_flash=False):
-        super().__init__()
-        self.layers = nn.ModuleList([
-            TransformerBlock(dim, heads, dim_head, use_flash=False) for _ in range(depth)
-        ])
-
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
         return x
 
 class ViTAutoencoder(nn.Module):
@@ -315,278 +289,256 @@ class ViTAutoencoder(nn.Module):
         self,
         image_size=(1920, 1920),
         patch_size=128,
-        latent_dim=256,
+        embedding_dim=256,
         dim=1024,
         depth=2,
         heads=8,
         dim_head=64,
         use_flash=True,
-        norm_pix=True  # Flag for patch normalization
+        norm_pix=True,
+        eps=1e-6
     ):
         super().__init__()
         self.patch_size = patch_size
         self.image_size = image_size
         self.norm_pix = norm_pix
+        self.eps = eps
 
         # Calculate patches
-        self.num_patches = (image_size[0] // patch_size) * (image_size[1] // patch_size)
-        patch_dim = 1 * patch_size * patch_size
+        self.h_patches = image_size[0] // patch_size
+        self.w_patches = image_size[1] // patch_size
+        self.num_patches = self.h_patches * self.w_patches
+        patch_dim = patch_size * patch_size
 
-        # Encoder components
+        # Patch-level normalization parameters (learned)
+        if norm_pix:
+            self.patch_norm_scale = nn.Parameter(torch.ones(1, 1, patch_dim))
+            self.patch_norm_bias = nn.Parameter(torch.zeros(1, 1, patch_dim))
+
+        # Encoder components with layer norm
         self.patch_embed = nn.Sequential(
-            nn.Linear(patch_dim, dim, bias=True),
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim),
             nn.LayerNorm(dim)
         )
 
-        ## # Learnable position embeddings
-        ## self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
-        # Fixed positional embedding
-        pos_embed = self._get_sinusoidal_pos_embed(self.num_patches, dim)
-        self.register_buffer('pos_embedding', pos_embed.unsqueeze(0))
+        # Position embeddings
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim) * 0.02)
 
-        # Transformer encoder
-        self.encoder = nn.ModuleList([
-            nn.Sequential(
-                TransformerBlock(dim, heads, dim_head, use_flash),
-                nn.Dropout(0.1)
-            ) for _ in range(depth)
+        # Transformer blocks
+        self.transformers = nn.ModuleList([
+            TransformerBlock(dim, heads, dim_head, use_flash)
+            for _ in range(depth)
         ])
 
-        # Projection to latent space
-        self.to_latent = nn.Sequential(
-            nn.LayerNorm(dim * self.num_patches),
-            nn.Linear(dim * self.num_patches, latent_dim, bias=True)
+        # Project to embedding space with normalization
+        self.to_embedding = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, embedding_dim),
+            nn.LayerNorm(embedding_dim)
         )
 
         # Decoder components
-        self.from_latent = nn.Sequential(
-            nn.LayerNorm(latent_dim),
-            nn.Linear(latent_dim, dim * self.num_patches, bias=True)
+        self.from_embedding = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, dim),
+            nn.LayerNorm(dim)
         )
 
-        # Transformer decoder
-        self.decoder = nn.ModuleList([
-            nn.Sequential(
-                TransformerBlock(dim, heads, dim_head, use_flash),
-                nn.Dropout(0.1)
-            ) for _ in range(depth)
+        # Decoder transformer blocks
+        self.decoder_transformers = nn.ModuleList([
+            TransformerBlock(dim, heads, dim_head, use_flash)
+            for _ in range(depth)
         ])
 
-        # Patch reconstruction
+        # Final projection with denormalization
         self.to_pixels = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, patch_dim, bias=True)
+            nn.Linear(dim, patch_dim)
         )
 
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize weights with orthogonal initialization"""
         def init_ortho(m):
             if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
         self.apply(init_ortho)
 
-        # Get the last Linear layer from each Sequential
-        to_latent_linear = [m for m in self.to_latent if isinstance(m, nn.Linear)][-1]
-        from_latent_linear = [m for m in self.from_latent if isinstance(m, nn.Linear)][-1]
-
-        # Initialize decoder projection as transpose of encoder
-        with torch.no_grad():
-            from_latent_linear.weight.copy_(to_latent_linear.weight.t())
-
-    def _get_sinusoidal_pos_embed(self, num_pos, dim, max_period=10000):
-        """
-        Generate fixed sinusoidal position embeddings.
-
-        Args:
-            num_pos   : Number of positions (patches)
-            dim       : Embedding dimension
-            max_period: Maximum period for the sinusoidal functions. Controls the
-                        range of wavelengths from 2π to max_period⋅2π. Higher values
-                        create longer-range position sensitivity.
-
-        Returns:
-            torch.Tensor: Position embeddings of shape (num_pos, dim)
-        """
-        assert dim % 2 == 0, "Embedding dimension must be even"
-
-        # Use half dimension for sin and half for cos
-        omega = torch.arange(dim // 2, dtype=torch.float32) / (dim // 2 - 1)
-        omega = 1. / (max_period**omega)  # geometric progression of wavelengths
-
-        pos = torch.arange(num_pos, dtype=torch.float32)
-        pos = pos.view(-1, 1)  # Shape: (num_pos, 1)
-        omega = omega.view(1, -1)  # Shape: (1, dim//2)
-
-        # Now when we multiply, broadcasting will work correctly
-        angles = pos * omega  # Shape: (num_pos, dim//2)
-
-        # Compute sin and cos embeddings
-        pos_emb_sin = torch.sin(angles)  # Shape: (num_pos, dim//2)
-        pos_emb_cos = torch.cos(angles)  # Shape: (num_pos, dim//2)
-
-        # Concatenate to get final embeddings
-        pos_emb = torch.cat([pos_emb_sin, pos_emb_cos], dim=1)  # Shape: (num_pos, dim)
-        return pos_emb
-
-    def normalize_patches(self, patches):
-        """
-        Normalize each patch independently
-        patches: (B, N, P*P) where N is number of patches, P is patch size
-        """
-        if not self.norm_pix:
-            return patches
-
-        # Calculate mean and var over patch pixels
-        mean = patches.mean(dim=-1, keepdim=True)
-        var = patches.var(dim=-1, keepdim=True)
-        patches = (patches - mean) / (var + 1e-6).sqrt()
-
-        return patches
-
-    def denormalize_patches(self, patches, orig_mean, orig_var):
-        """
-        Denormalize patches using stored statistics
-        """
-        if not self.norm_pix:
-            return patches
-
-        patches = patches * (orig_var + 1e-6).sqrt() + orig_mean
-        return patches
+        # Initialize position embeddings
+        nn.init.normal_(self.pos_embedding, std=0.02)
 
     def patchify(self, x):
-        """Convert image to patches"""
         return rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', 
                         p1=self.patch_size, p2=self.patch_size)
 
     def unpatchify(self, patches):
-        """Convert patches back to image"""
-        h_patches = w_patches = int(math.sqrt(self.num_patches))
         return rearrange(patches, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
-                        h=h_patches, w=w_patches, p1=self.patch_size, p2=self.patch_size)
+                        h=self.h_patches, w=self.w_patches,
+                        p1=self.patch_size, p2=self.patch_size)
+
+    def normalize_patches(self, patches):
+        if not self.norm_pix:
+            return patches
+
+        # Calculate patch statistics
+        patch_mean = patches.mean(dim=-1, keepdim=True)
+        patch_var = patches.var(dim=-1, keepdim=True, unbiased=False)
+        patches = (patches - patch_mean) / torch.sqrt(patch_var + self.eps)
+
+        # Apply learned normalization parameters
+        patches = patches * self.patch_norm_scale + self.patch_norm_bias
+        return patches
+
+    def denormalize_patches(self, patches, orig_mean, orig_var):
+        if not self.norm_pix:
+            return patches
+
+        # Remove learned normalization
+        patches = (patches - self.patch_norm_bias) / self.patch_norm_scale
+
+        # Restore original scale
+        patches = patches * torch.sqrt(orig_var + self.eps) + orig_mean
+        return patches
 
     def encode(self, x):
-        # Convert image to patches
+        # Save original statistics for denormalization
         patches = self.patchify(x)
-
-        # Store original statistics for denormalization if needed
         if self.norm_pix:
             self.orig_mean = patches.mean(dim=-1, keepdim=True)
-            self.orig_var = patches.var(dim=-1, keepdim=True)
+            self.orig_var = patches.var(dim=-1, keepdim=True, unbiased=False)
             patches = self.normalize_patches(patches)
 
-        # Patch embedding
-        tokens = self.patch_embed(patches)
+        # Embed patches
+        x = self.patch_embed(patches)
 
-        # Add positional embedding
-        x = tokens + self.pos_embedding
+        # Add positional embeddings
+        x = x + self.pos_embedding
 
-        # Transformer encoding
-        for encoder_block in self.encoder:
-            x = x + encoder_block(x)
+        # Transform
+        for transformer in self.transformers:
+            x = transformer(x)
 
-        # Project to latent space
-        latent = self.to_latent(rearrange(x, 'b n d -> b (n d)'))
-        return latent
+        # Project to embedding space
+        spatial_latent = self.to_embedding(x)
+        return spatial_latent
 
     def decode(self, z):
-        # Project from latent space
-        x = self.from_latent(z)
-        x = rearrange(x, 'b (n d) -> b n d', n=self.num_patches)
+        # Project back to transformer dim
+        x = self.from_embedding(z)
 
-        # Transformer decoding
-        for decoder_block in self.decoder:
-            x = x + decoder_block(x)
+        # Transform
+        for transformer in self.decoder_transformers:
+            x = transformer(x)
 
-        # Reconstruct patches
+        # Project to pixels
         patches = self.to_pixels(x)
 
         # Denormalize if needed
         if self.norm_pix:
             patches = self.denormalize_patches(patches, self.orig_mean, self.orig_var)
 
-        # Convert patches back to image
+        # Reshape to image
         return self.unpatchify(patches)
 
     def forward(self, x):
-        latent = self.encode(x)
-        return self.decode(latent)
+        # Optional global normalization
+        if hasattr(self, 'normalizer'):
+            x = self.normalizer(x)
 
-## input_dim = 1920*1920
-## latent_dim = 256
-## model = LinearAE(input_dim, latent_dim)
+        spatial_latent = self.encode(x)
+        return self.decode(spatial_latent), spatial_latent
 
-num_codebook_vectors = 16
-latent_dim = 256
+class VQ_AE(nn.Module):
+    def __init__(self, vq, ae):
+        super().__init__()
+        self.ae = ae
+        self.vq = vq
+
+    def forward(self, x):
+        spatial_latent = self.ae.encode(x)
+        z_quantized, vq_loss, indices = self.vq(spatial_latent)
+        decoded = self.ae.decode(z_quantized)
+        return decoded, z_quantized, vq_loss
+
+# Model initialization
+num_codebook_vectors = 512  # Increased codebook size
+embedding_dim = 256
 commitment_cost = 0.25
-vq = VectorQuantizer(
+vq_model = VectorQuantizer(
     num_embeddings=num_codebook_vectors,
-    embedding_dim=latent_dim,
+    embedding_dim=embedding_dim,
     commitment_cost=commitment_cost
 )
+logger.info(f"VQ: {sum(p.numel() for p in vq_model.parameters())/1e6} M pamameters.")
 
-model = ViTAutoencoder(
+ae_model = ViTAutoencoder(
     image_size=(1920, 1920),
     patch_size=128,
-    latent_dim=256,
+    embedding_dim=embedding_dim,
     dim=1024,
-    depth=2,
+    depth=4,
     use_flash=True,
     norm_pix=True,
 )
-logger.info(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
+logger.info(f"AE: {sum(p.numel() for p in ae_model.parameters())/1e6} M pamameters.")
+
+model = VQ_AE(vq_model, ae_model)
 
 # -- Loss
 ## criterion = nn.MSELoss()
 ## criterion = nn.L1Loss()
 
-class LatentDiversityLoss(nn.Module):
+class SpatialLatentDiversityLoss(nn.Module):
     def __init__(self, min_distance=0.1):
         super().__init__()
         self.min_distance = min_distance
 
     def forward(self, z):
+        # z shape: [batch_size, spatial_h * spatial_w, embedding_dim]
         batch_size = z.size(0)
+
         if batch_size <= 1:
             return torch.tensor(0.0, device=z.device)
 
-        # Normalize latent vectors
-        z_normalized = F.normalize(z, p=2, dim=1)
+        # Pool spatial dimensions to get single vector per image
+        z_pooled = z.mean(dim=1)  # [batch_size, embedding_dim]
 
-        # Compute cosine similarity
+        # Normalize pooled vectors
+        z_normalized = F.normalize(z_pooled, p=2, dim=1)
+
+        # Compute similarity matrix
         similarity = torch.mm(z_normalized, z_normalized.t())
         similarity = torch.clamp(similarity, -1.0, 1.0)
 
-        # Mask out diagonal
+        # Mask out self-similarity
         mask = ~torch.eye(batch_size, dtype=torch.bool, device=z.device)
         similarity = similarity[mask].view(batch_size, -1)
 
-        # Convert to distance and compute loss
+        # Compute distance-based loss
         distance = 1.0 - similarity
         loss = F.relu(self.min_distance - distance).mean()
 
         return loss
 
 class AdaptiveWeightedLoss(nn.Module):
-    def __init__(self, kernel_size=15, weight_factor=2.0):
+    def __init__(self, kernel_size=15, weight_factor=1.0):
         super().__init__()
         self.kernel_size = kernel_size
         self.weight_factor = weight_factor
 
     def compute_local_contrast(self, x):
-        # Compute local mean using average pooling
         padding = self.kernel_size // 2
         local_mean = F.avg_pool2d(
             F.pad(x, (padding, padding, padding, padding), mode='reflect'),
             self.kernel_size,
             stride=1
         )
-
-        # Compute local standard deviation
         local_var = F.avg_pool2d(
             F.pad((x - local_mean)**2, (padding, padding, padding, padding), mode='reflect'),
             self.kernel_size,
@@ -594,40 +546,41 @@ class AdaptiveWeightedLoss(nn.Module):
         )
         local_std = torch.sqrt(local_var + 1e-6)
 
-        # Normalize to create weight map
-        weight_map = 1.0 + self.weight_factor * (local_std / local_std.mean())
+        # Normalize and scale weights
+        weight_map = 1.0 + self.weight_factor * (local_std / (local_std.mean() + 1e-6))
         return weight_map
 
     def forward(self, pred, target):
-        # Compute base L1 loss
+        # Basic reconstruction loss
         base_loss = torch.abs(pred - target)
 
-        # Compute weight map based on local contrast of target
+        # Weight map based on local contrast
         weight_map = self.compute_local_contrast(target)
 
-        # Apply weights to loss
+        # Combine
         weighted_loss = base_loss * weight_map
-
         return weighted_loss.mean()
 
 class TotalLoss(nn.Module):
-    def __init__(self, kernel_size, weight_factor, min_distance, div_weight):
+    def __init__(self, kernel_size=5, weight_factor=1.0, min_distance=0.1, div_weight=0.01):
         super().__init__()
-        self.adaptive_criterion  = AdaptiveWeightedLoss(kernel_size, weight_factor)
-        self.diversity_criterion = LatentDiversityLoss(min_distance)
+        self.adaptive_criterion = AdaptiveWeightedLoss(kernel_size, weight_factor)
+        self.diversity_criterion = SpatialLatentDiversityLoss(min_distance)
         self.div_weight = div_weight
 
-    def forward(self, batch, latent, batch_logits):
-        rec_loss = self.adaptive_criterion(batch_logits, batch)
+    def forward(self, input_batch, latent, output_batch):
+        rec_loss = self.adaptive_criterion(output_batch, input_batch)
         div_loss = self.diversity_criterion(latent)
         total_loss = rec_loss + self.div_weight * div_loss
         return total_loss
 
 kernel_size = 5
-weight_factor = 10
-min_distance = 100
+weight_factor = 1
+min_distance = 0.1
 div_weight = 0.1
 criterion = TotalLoss(kernel_size, weight_factor, min_distance, div_weight)
+
+vq_weight = 0.5
 
 # -- Optim
 def cosine_decay(initial_lr: float, current_step: int, total_steps: int, final_lr: float = 0.0) -> float:
@@ -646,13 +599,29 @@ init_lr = 1e-3
 weight_decay = 0
 adam_beta1 = 0.9
 adam_beta2 = 0.999
-param_iter = model.parameters()
 optim_arg_dict = dict(
     lr           = init_lr,
     weight_decay = weight_decay,
     betas        = (adam_beta1, adam_beta2),
 )
-optimizer = optim.AdamW(param_iter, **optim_arg_dict)
+param_groups = [
+    {
+        'params': model.ae.parameters(),
+        'lr': init_lr,
+        'weight_decay': weight_decay,
+        'betas': (adam_beta1, adam_beta2),
+        'name': 'ae'
+    },
+    {
+        'params': model.vq.parameters(),
+        ## 'lr': init_lr * 0.1,
+        'lr': init_lr,
+        'weight_decay': weight_decay,
+        'betas': (adam_beta1, adam_beta2),
+        'name': 'vq'
+    }
+]
+optimizer = optim.AdamW(param_groups)
 
 # -- Dataset
 zarr_path = 'peaknet10k/mfxl1025422_r0313_peaknet.0031.zarr'
@@ -662,7 +631,6 @@ batch_size = 4
 # -- Device
 device = f'cuda:0' if torch.cuda.is_available() else 'cpu'
 if device != 'cpu': torch.cuda.set_device(device)
-vq.to(device)
 model.to(device)
 
 # -- Misc
@@ -686,6 +654,7 @@ normalizer = InstanceNorm(scales_variance=True)
 # --- Checkpoint
 checkpointer = Checkpoint()
 path_chkpt = 'chkpt_ae_lite'
+path_chkpt_vq = 'chkpt_ae_lite_vq'
 
 # --- Memory
 def log_memory():
@@ -703,7 +672,11 @@ while True:
     # Adjust learning rate
     lr = cosine_decay(init_lr, iteration_counter, total_iterations*0.5, init_lr*1e-1)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+        if param_group['name'] == 'ae':
+            param_group['lr'] = lr
+        elif param_group['name'] == 'vq':
+            ## param_group['lr'] = lr * 0.1
+            param_group['lr'] = lr
 
     batches = chunked(z_store['images'], batch_size)
     for enum_idx, batch in enumerate(batches):
@@ -712,7 +685,7 @@ while True:
 
         # Turn list of arrays into a single array with the batch dim
         batch = torch.from_numpy(np.stack(batch)).unsqueeze(1).to(device, non_blocking=True)
-        ## batch = normalizer(batch)
+        batch = normalizer(batch)
 
         batch[...,:10,:]=0
         batch[...,-10:,:]=0
@@ -721,11 +694,9 @@ while True:
 
         # Fwd/Bwd
         with autocast_context:
-            latent = model.encode(batch)
-            z_quantized, vq_loss, _ = vq(latent)
-            batch_logits = model.decode(z_quantized)
-            recon_loss = criterion(batch, latent, batch_logits)
-            loss = vq_loss + recon_loss
+            batch_logits, z_quantized, vq_loss = model(batch)
+            recon_loss = criterion(batch, z_quantized, batch_logits)
+            loss = vq_weight * vq_loss + recon_loss
         scaler.scale(loss).backward()
 
         if grad_clip != 0.0:
