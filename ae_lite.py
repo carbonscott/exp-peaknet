@@ -2,6 +2,7 @@ import numpy as np
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 import zarr
@@ -19,6 +20,8 @@ from peaknet.tensor_transforms import (
     InstanceNorm,
 )
 from peaknet.utils.checkpoint import Checkpoint
+
+import gc
 
 import logging
 logging.basicConfig(
@@ -248,17 +251,19 @@ class ViTAutoencoder(nn.Module):
     def __init__(
         self,
         image_size=(1920, 1920),
-        patch_size=32,
+        patch_size=128,
         latent_dim=256,
-        dim=512,
-        depth=6,
+        dim=1024,
+        depth=2,
         heads=8,
         dim_head=64,
-        use_flash=False
+        use_flash=True,
+        norm_pix=True  # Flag for patch normalization
     ):
         super().__init__()
         self.patch_size = patch_size
         self.image_size = image_size
+        self.norm_pix = norm_pix
 
         # Calculate patches
         self.num_patches = (image_size[0] // patch_size) * (image_size[1] // patch_size)
@@ -266,64 +271,163 @@ class ViTAutoencoder(nn.Module):
 
         # Encoder components
         self.patch_embed = nn.Sequential(
-            nn.LayerNorm(patch_dim),
-            nn.Linear(patch_dim, dim, bias=False),
+            nn.Linear(patch_dim, dim, bias=True),
             nn.LayerNorm(dim)
         )
 
-        # Learnable position embeddings
-        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
+        ## # Learnable position embeddings
+        ## self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches, dim))
+        # Fixed positional embedding
+        pos_embed = self._get_sinusoidal_pos_embed(self.num_patches, dim)
+        self.register_buffer('pos_embedding', pos_embed.unsqueeze(0))
 
         # Transformer encoder
-        self.encoder = TransformerEncoder(dim, depth, heads, dim_head, use_flash)
+        self.encoder = nn.ModuleList([
+            nn.Sequential(
+                TransformerBlock(dim, heads, dim_head, use_flash),
+                nn.Dropout(0.1)
+            ) for _ in range(depth)
+        ])
 
         # Projection to latent space
-        self.to_latent = nn.Linear(dim * self.num_patches, latent_dim, bias=False)
+        self.to_latent = nn.Sequential(
+            nn.LayerNorm(dim * self.num_patches),
+            nn.Linear(dim * self.num_patches, latent_dim, bias=True)
+        )
 
         # Decoder components
-        self.from_latent = nn.Linear(latent_dim, dim * self.num_patches, bias=False)
+        self.from_latent = nn.Sequential(
+            nn.LayerNorm(latent_dim),
+            nn.Linear(latent_dim, dim * self.num_patches, bias=True)
+        )
 
         # Transformer decoder
-        self.decoder = TransformerDecoder(dim, depth, heads, dim_head, use_flash)
+        self.decoder = nn.ModuleList([
+            nn.Sequential(
+                TransformerBlock(dim, heads, dim_head, use_flash),
+                nn.Dropout(0.1)
+            ) for _ in range(depth)
+        ])
 
         # Patch reconstruction
         self.to_pixels = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim, dim * 2, bias=False),
-            nn.GELU(),
-            nn.Linear(dim * 2, dim * 4, bias=False),
-            nn.GELU(),
-            nn.Linear(dim * 4, patch_dim, bias=False)
+            nn.Linear(dim, patch_dim, bias=True)
         )
 
         self._init_weights()
 
     def _init_weights(self):
+        """Initialize weights with orthogonal initialization"""
         def init_ortho(m):
             if isinstance(m, nn.Linear):
                 nn.init.orthogonal_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
         self.apply(init_ortho)
 
+        # Get the last Linear layer from each Sequential
+        to_latent_linear = [m for m in self.to_latent if isinstance(m, nn.Linear)][-1]
+        from_latent_linear = [m for m in self.from_latent if isinstance(m, nn.Linear)][-1]
+
         # Initialize decoder projection as transpose of encoder
         with torch.no_grad():
-            self.from_latent.weight.copy_(self.to_latent.weight.t())
+            from_latent_linear.weight.copy_(to_latent_linear.weight.t())
+
+    def _get_sinusoidal_pos_embed(self, num_pos, dim, max_period=10000):
+        """
+        Generate fixed sinusoidal position embeddings.
+
+        Args:
+            num_pos   : Number of positions (patches)
+            dim       : Embedding dimension
+            max_period: Maximum period for the sinusoidal functions. Controls the
+                        range of wavelengths from 2π to max_period⋅2π. Higher values
+                        create longer-range position sensitivity.
+
+        Returns:
+            torch.Tensor: Position embeddings of shape (num_pos, dim)
+        """
+        assert dim % 2 == 0, "Embedding dimension must be even"
+
+        # Use half dimension for sin and half for cos
+        omega = torch.arange(dim // 2, dtype=torch.float32) / (dim // 2 - 1)
+        omega = 1. / (max_period**omega)  # geometric progression of wavelengths
+
+        pos = torch.arange(num_pos, dtype=torch.float32)
+        pos = pos.view(-1, 1)  # Shape: (num_pos, 1)
+        omega = omega.view(1, -1)  # Shape: (1, dim//2)
+
+        # Now when we multiply, broadcasting will work correctly
+        angles = pos * omega  # Shape: (num_pos, dim//2)
+
+        # Compute sin and cos embeddings
+        pos_emb_sin = torch.sin(angles)  # Shape: (num_pos, dim//2)
+        pos_emb_cos = torch.cos(angles)  # Shape: (num_pos, dim//2)
+
+        # Concatenate to get final embeddings
+        pos_emb = torch.cat([pos_emb_sin, pos_emb_cos], dim=1)  # Shape: (num_pos, dim)
+        return pos_emb
+
+    def normalize_patches(self, patches):
+        """
+        Normalize each patch independently
+        patches: (B, N, P*P) where N is number of patches, P is patch size
+        """
+        if not self.norm_pix:
+            return patches
+
+        # Calculate mean and var over patch pixels
+        mean = patches.mean(dim=-1, keepdim=True)
+        var = patches.var(dim=-1, keepdim=True)
+        patches = (patches - mean) / (var + 1e-6).sqrt()
+
+        return patches
+
+    def denormalize_patches(self, patches, orig_mean, orig_var):
+        """
+        Denormalize patches using stored statistics
+        """
+        if not self.norm_pix:
+            return patches
+
+        patches = patches * (orig_var + 1e-6).sqrt() + orig_mean
+        return patches
+
+    def patchify(self, x):
+        """Convert image to patches"""
+        return rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', 
+                        p1=self.patch_size, p2=self.patch_size)
+
+    def unpatchify(self, patches):
+        """Convert patches back to image"""
+        h_patches = w_patches = int(math.sqrt(self.num_patches))
+        return rearrange(patches, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
+                        h=h_patches, w=w_patches, p1=self.patch_size, p2=self.patch_size)
 
     def encode(self, x):
         # Convert image to patches
-        patches = rearrange(x, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size)
+        patches = self.patchify(x)
+
+        # Store original statistics for denormalization if needed
+        if self.norm_pix:
+            self.orig_mean = patches.mean(dim=-1, keepdim=True)
+            self.orig_var = patches.var(dim=-1, keepdim=True)
+            patches = self.normalize_patches(patches)
 
         # Patch embedding
         tokens = self.patch_embed(patches)
 
         # Add positional embedding
-        tokens = tokens + self.pos_embedding
+        x = tokens + self.pos_embedding
 
         # Transformer encoding
-        encoded = self.encoder(tokens)
+        for encoder_block in self.encoder:
+            x = x + encoder_block(x)
 
         # Project to latent space
-        latent = self.to_latent(rearrange(encoded, 'b n d -> b (n d)'))
+        latent = self.to_latent(rearrange(x, 'b n d -> b (n d)'))
         return latent
 
     def decode(self, z):
@@ -332,20 +436,22 @@ class ViTAutoencoder(nn.Module):
         x = rearrange(x, 'b (n d) -> b n d', n=self.num_patches)
 
         # Transformer decoding
-        x = self.decoder(x)
+        for decoder_block in self.decoder:
+            x = x + decoder_block(x)
 
         # Reconstruct patches
         patches = self.to_pixels(x)
 
+        # Denormalize if needed
+        if self.norm_pix:
+            patches = self.denormalize_patches(patches, self.orig_mean, self.orig_var)
+
         # Convert patches back to image
-        h_patches = w_patches = int(math.sqrt(self.num_patches))
-        imgs = rearrange(patches, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
-                         h=h_patches, w=w_patches, p1=self.patch_size, p2=self.patch_size)
-        return imgs
+        return self.unpatchify(patches)
 
     def forward(self, x):
-        z = self.encode(x)
-        return self.decode(z)
+        latent = self.encode(x)
+        return self.decode(latent)
 
 ## input_dim = 1920*1920
 ## latent_dim = 256
@@ -354,16 +460,102 @@ class ViTAutoencoder(nn.Module):
 model = ViTAutoencoder(
     image_size=(1920, 1920),
     patch_size=128,
-    latent_dim=64,
-    dim=512,
-    depth=1,
+    latent_dim=256,
+    dim=1024,
+    depth=2,
     use_flash=True,
+    norm_pix=True,
 )
 logger.info(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
 # -- Loss
 ## criterion = nn.MSELoss()
-criterion = nn.L1Loss()
+## criterion = nn.L1Loss()
+
+class LatentDiversityLoss(nn.Module):
+    def __init__(self, min_distance=0.1):
+        super().__init__()
+        self.min_distance = min_distance
+
+    def forward(self, z):
+        batch_size = z.size(0)
+        if batch_size <= 1:
+            return torch.tensor(0.0, device=z.device)
+
+        # Normalize latent vectors
+        z_normalized = F.normalize(z, p=2, dim=1)
+
+        # Compute cosine similarity
+        similarity = torch.mm(z_normalized, z_normalized.t())
+        similarity = torch.clamp(similarity, -1.0, 1.0)
+
+        # Mask out diagonal
+        mask = ~torch.eye(batch_size, dtype=torch.bool, device=z.device)
+        similarity = similarity[mask].view(batch_size, -1)
+
+        # Convert to distance and compute loss
+        distance = 1.0 - similarity
+        loss = F.relu(self.min_distance - distance).mean()
+
+        return loss
+
+class AdaptiveWeightedLoss(nn.Module):
+    def __init__(self, kernel_size=15, weight_factor=2.0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.weight_factor = weight_factor
+
+    def compute_local_contrast(self, x):
+        # Compute local mean using average pooling
+        padding = self.kernel_size // 2
+        local_mean = F.avg_pool2d(
+            F.pad(x, (padding, padding, padding, padding), mode='reflect'),
+            self.kernel_size,
+            stride=1
+        )
+
+        # Compute local standard deviation
+        local_var = F.avg_pool2d(
+            F.pad((x - local_mean)**2, (padding, padding, padding, padding), mode='reflect'),
+            self.kernel_size,
+            stride=1
+        )
+        local_std = torch.sqrt(local_var + 1e-6)
+
+        # Normalize to create weight map
+        weight_map = 1.0 + self.weight_factor * (local_std / local_std.mean())
+        return weight_map
+
+    def forward(self, pred, target):
+        # Compute base L1 loss
+        base_loss = torch.abs(pred - target)
+
+        # Compute weight map based on local contrast of target
+        weight_map = self.compute_local_contrast(target)
+
+        # Apply weights to loss
+        weighted_loss = base_loss * weight_map
+
+        return weighted_loss.mean()
+
+class TotalLoss(nn.Module):
+    def __init__(self, kernel_size, weight_factor, min_distance, div_weight):
+        super().__init__()
+        self.adaptive_criterion  = AdaptiveWeightedLoss(kernel_size, weight_factor)
+        self.diversity_criterion = LatentDiversityLoss(min_distance)
+        self.div_weight = div_weight
+
+    def forward(self, batch, latent, batch_logits):
+        rec_loss = self.adaptive_criterion(batch_logits, batch)
+        div_loss = self.diversity_criterion(latent)
+        total_loss = rec_loss + self.div_weight * div_loss
+        return total_loss
+
+kernel_size = 5
+weight_factor = 10
+min_distance = 100
+div_weight = 0.1
+criterion = TotalLoss(kernel_size, weight_factor, min_distance, div_weight)
 
 # -- Optim
 def cosine_decay(initial_lr: float, current_step: int, total_steps: int, final_lr: float = 0.0) -> float:
@@ -422,22 +614,32 @@ normalizer = InstanceNorm(scales_variance=True)
 checkpointer = Checkpoint()
 path_chkpt = 'chkpt_ae_lite'
 
+# --- Memory
+def log_memory():
+    if torch.cuda.is_available():
+        logger.info(f"CUDA memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        logger.info(f"CUDA memory cached: {torch.cuda.memory_cached() / 1e9:.2f} GB")
+
 # -- Trainig loop
 iteration_counter = 0
 total_iterations  = 500
 loss_min = float('inf')
 while True:
+    torch.cuda.synchronize()
+
     # Adjust learning rate
-    lr = cosine_decay(init_lr, iteration_counter, total_iterations*0.5, init_lr*1e-3)
+    lr = cosine_decay(init_lr, iteration_counter, total_iterations*0.5, init_lr*1e-1)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
     batches = chunked(z_store['images'], batch_size)
     for enum_idx, batch in enumerate(batches):
+        if enum_idx % 10 == 0:  # Log every epoch
+            log_memory()
 
         # Turn list of arrays into a single array with the batch dim
-        batch = torch.from_numpy(np.stack(batch)).unsqueeze(1).to(device)
-        batch = normalizer(batch)
+        batch = torch.from_numpy(np.stack(batch)).unsqueeze(1).to(device, non_blocking=True)
+        ## batch = normalizer(batch)
 
         batch[...,:10,:]=0
         batch[...,-10:,:]=0
@@ -446,8 +648,11 @@ while True:
 
         # Fwd/Bwd
         with autocast_context:
-            batch_logits = model(batch)
-            loss = criterion(batch_logits, batch)
+            ## batch_logits = model(batch)
+            ## loss = criterion(batch_logits, batch)
+            latent = model.encode(batch)
+            batch_logits = model.decode(latent)
+            loss = criterion(batch, latent, batch_logits)
         scaler.scale(loss).backward()
 
         if grad_clip != 0.0:
