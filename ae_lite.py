@@ -172,6 +172,69 @@ class ConvAE(nn.Module):
         # Convolutional decoding
         return self.decoder_conv(x)
 
+# --- VQ
+class VectorQuantizer(nn.Module):
+    def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.commitment_cost = commitment_cost
+
+        # Initialize embeddings
+        self.embeddings = nn.Parameter(torch.randn(num_embeddings, embedding_dim))
+        nn.init.xavier_uniform_(self.embeddings)
+
+        # Add EMA tracking for codebook updates
+        self.register_buffer('_ema_cluster_size', torch.zeros(num_embeddings))
+        self._ema_w = 0.99
+        self._epsilon = 1e-5
+        self.register_buffer('_ema_dw', torch.zeros((num_embeddings, embedding_dim)))
+
+    def forward(self, x):
+        # Flatten input
+        flat_x = x.reshape(-1, self.embedding_dim)
+
+        # Calculate distances
+        distances = (torch.sum(flat_x**2, dim=1, keepdim=True)
+                    + torch.sum(self.embeddings**2, dim=1)
+                    - 2 * torch.matmul(flat_x, self.embeddings.t()))
+
+        # Encoding
+        encoding_indices = torch.argmin(distances, dim=1)
+        encodings = F.one_hot(encoding_indices, self.num_embeddings).float()
+
+        # Quantize
+        quantized = torch.matmul(encodings, self.embeddings)
+
+        # Reshape quantized values to match input shape
+        quantized = quantized.reshape(x.shape)
+
+        # EMA codebook update
+        if self.training:
+            self._ema_cluster_size = self._ema_cluster_size * self._ema_w + \
+                                   (1 - self._ema_w) * torch.sum(encodings, dim=0)
+
+            # Laplace smoothing of the cluster size
+            n = torch.sum(self._ema_cluster_size.data)
+            self._ema_cluster_size = (
+                (self._ema_cluster_size + self._epsilon)
+                / (n + self.num_embeddings * self._epsilon) * n)
+
+            dw = torch.matmul(encodings.t(), flat_x)
+            self._ema_dw = self._ema_w * self._ema_dw + (1 - self._ema_w) * dw
+
+            self.embeddings.data = self._ema_dw / self._ema_cluster_size.unsqueeze(1)
+
+        # Loss
+        e_latent_loss = F.mse_loss(quantized.detach(), x)
+        q_latent_loss = F.mse_loss(quantized, x.detach())
+        loss = q_latent_loss + self.commitment_cost * e_latent_loss
+
+        # Straight through estimator
+        quantized = x + (quantized - x).detach()
+
+        return quantized, loss, encoding_indices
+
 # --- Transformers
 class MultiHeadAttention(nn.Module):
     def __init__(self, dim, heads=8, dim_head=64, use_flash=False):
@@ -457,6 +520,15 @@ class ViTAutoencoder(nn.Module):
 ## latent_dim = 256
 ## model = LinearAE(input_dim, latent_dim)
 
+num_codebook_vectors = 16
+latent_dim = 256
+commitment_cost = 0.25
+vq = VectorQuantizer(
+    num_embeddings=num_codebook_vectors,
+    embedding_dim=latent_dim,
+    commitment_cost=commitment_cost
+)
+
 model = ViTAutoencoder(
     image_size=(1920, 1920),
     patch_size=128,
@@ -590,6 +662,7 @@ batch_size = 4
 # -- Device
 device = f'cuda:0' if torch.cuda.is_available() else 'cpu'
 if device != 'cpu': torch.cuda.set_device(device)
+vq.to(device)
 model.to(device)
 
 # -- Misc
@@ -648,11 +721,11 @@ while True:
 
         # Fwd/Bwd
         with autocast_context:
-            ## batch_logits = model(batch)
-            ## loss = criterion(batch_logits, batch)
             latent = model.encode(batch)
-            batch_logits = model.decode(latent)
-            loss = criterion(batch, latent, batch_logits)
+            z_quantized, vq_loss, _ = vq(latent)
+            batch_logits = model.decode(z_quantized)
+            recon_loss = criterion(batch, latent, batch_logits)
+            loss = vq_loss + recon_loss
         scaler.scale(loss).backward()
 
         if grad_clip != 0.0:
