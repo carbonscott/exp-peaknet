@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 import torch
@@ -460,18 +461,15 @@ class ViTAutoencoder(nn.Module):
 model = ViTAutoencoder(
     image_size=(1920, 1920),
     patch_size=128,
-    latent_dim=256,
+    latent_dim=64,
     dim=1024,
-    depth=2,
+    depth=1,
     use_flash=True,
     norm_pix=True,
 )
 logger.info(f"{sum(p.numel() for p in model.parameters())/1e6} M pamameters.")
 
 # -- Loss
-## criterion = nn.MSELoss()
-## criterion = nn.L1Loss()
-
 class LatentDiversityLoss(nn.Module):
     def __init__(self, min_distance=0.1):
         super().__init__()
@@ -552,10 +550,13 @@ class TotalLoss(nn.Module):
         return total_loss
 
 kernel_size = 5
-weight_factor = 10
-min_distance = 100
-div_weight = 0.1
+weight_factor = 0.5
+min_distance = 0.1
+div_weight = 0.01
 criterion = TotalLoss(kernel_size, weight_factor, min_distance, div_weight)
+
+## criterion = nn.MSELoss()
+## criterion = nn.L1Loss()
 
 # -- Optim
 def cosine_decay(initial_lr: float, current_step: int, total_steps: int, final_lr: float = 0.0) -> float:
@@ -612,7 +613,7 @@ normalizer = InstanceNorm(scales_variance=True)
 
 # --- Checkpoint
 checkpointer = Checkpoint()
-path_chkpt = 'chkpt_ae_lite'
+path_chkpt = f"chkpt_ae_lite.{os.getenv('CUDA_VISIBLE_DEVICES')}"
 
 # --- Memory
 def log_memory():
@@ -622,13 +623,13 @@ def log_memory():
 
 # -- Trainig loop
 iteration_counter = 0
-total_iterations  = 500
+total_iterations  = 100000
 loss_min = float('inf')
 while True:
     torch.cuda.synchronize()
 
     # Adjust learning rate
-    lr = cosine_decay(init_lr, iteration_counter, total_iterations*0.5, init_lr*1e-1)
+    lr = cosine_decay(init_lr, iteration_counter, total_iterations*0.5, init_lr*1e-3)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -650,6 +651,7 @@ while True:
         with autocast_context:
             ## batch_logits = model(batch)
             ## loss = criterion(batch_logits, batch)
+
             latent = model.encode(batch)
             batch_logits = model.decode(latent)
             loss = criterion(batch, latent, batch_logits)
@@ -678,9 +680,10 @@ while True:
 
         iteration_counter += 1
 
-    if iteration_counter > 0.2*total_iterations and loss_min > loss.item():
-        loss_min = loss.item()
-        checkpointer.save(0, model, optimizer, None, None, path_chkpt)
+        if ((iteration_counter+1)%100 == 0) and (loss_min > loss.item()):
+            loss_min = loss.item()
+            checkpointer.save(0, model, optimizer, None, None, path_chkpt)
+            logger.info(f"--> Saving chkpts to {path_chkpt}")
     if iteration_counter > total_iterations:
         break
 
