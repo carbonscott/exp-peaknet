@@ -461,7 +461,7 @@ class ViTAutoencoder(nn.Module):
 model = ViTAutoencoder(
     image_size=(1920, 1920),
     patch_size=128,
-    latent_dim=64,
+    latent_dim=256,
     dim=1024,
     depth=1,
     use_flash=True,
@@ -549,7 +549,7 @@ class TotalLoss(nn.Module):
         total_loss = rec_loss + self.div_weight * div_loss
         return total_loss
 
-kernel_size = 5
+kernel_size = 3
 weight_factor = 0.5
 min_distance = 0.1
 div_weight = 0.01
