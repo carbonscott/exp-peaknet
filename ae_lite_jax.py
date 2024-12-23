@@ -11,6 +11,8 @@ import einops
 from jaxtyping import Array, Float, Int, PyTree, PRNGKeyArray
 from typing import Tuple
 
+import math
+
 import logging
 logging.basicConfig(
     level=logging.INFO,
@@ -196,7 +198,7 @@ class ViTAutoencoder(eqx.Module):
 
         # -- Latent code
         self.to_latent = eqx.nn.Sequential([
-            eqx.nn.LayerNorm(dim),
+            eqx.nn.LayerNorm(dim * self.num_patches),
             eqx.nn.Linear(dim * self.num_patches, latent_dim, use_bias=True, key=keys[2])
         ])
         self.from_latent = eqx.nn.Sequential([
@@ -238,27 +240,30 @@ class ViTAutoencoder(eqx.Module):
         pos_emb_cos = jnp.cos(angles)  # Shape: (num_pos, dim//2)
 
         # Concatenate to get final embeddings
-        pos_emb = einops.pack([pos_emb_sin, pos_emb_cos], 'num_pos *') # [num_pos, dim]
+        pos_emb = einops.pack([pos_emb_sin, pos_emb_cos], 'num_pos *')[0] # [num_pos, dim]
+                                                                          # einops.pack result is at position 0
         return pos_emb
 
     @eqx.filter_jit
     def patchify(self, x: Float[Array, "c h w"]):
-        return rearrange(x, 'c (h p1) (w p2) -> (h w) (p1 p2 c)',
-                         p1=self.patch_size, p2=self.patch_size)
+        return einops.rearrange(x, 'c (h p1) (w p2) -> (h w) (p1 p2 c)',
+                                p1=self.patch_size, p2=self.patch_size)
 
     @eqx.filter_jit
     def unpatchify(self, x: Float[Array, "h_w p1_p2_c"]):
-        return rearrange(x, '(h w) (p1 p2 c) -> c (h p1) (w p2)',
-                         p1=self.patch_size, p2=self.patch_size)
+        h_patches = w_patches = int(math.sqrt(self.num_patches))
+        return einops.rearrange(x, '(h w) (p1 p2 c) -> c (h p1) (w p2)',
+                                p1=self.patch_size, p2=self.patch_size, h=h_patches)
 
     @eqx.filter_jit
     def encode(self, x: Float[Array, "c h w"]):
         patches = self.patchify(x)
-        tokens = jax.vmap(self.patch_embed)(patches) + jax.lax.stop_gradient(self.pos_embed)
+        tokens = jax.vmap(self.patch_embed)(patches) + jax.lax.stop_gradient(self.pos_embed) # vmap handles patch dim
+                                                                                             # outer vmap handles batch dim
         for encoder_block in self.encoder:
             tokens = tokens + encoder_block(tokens)
         tokens = einops.rearrange(tokens, 't e -> (t e)')
-        latent = jax.vmap(self.to_latent)(tokens)
+        latent = self.to_latent(tokens)
         return latent
 
     @eqx.filter_jit
@@ -274,5 +279,5 @@ class ViTAutoencoder(eqx.Module):
     @eqx.filter_jit
     def __call__(self, x: Float[Array, "c h w"]):
         latent = self.encode(x)
-        recon  = self.decoder(latent)
+        recon  = self.decode(latent)
         return recon
