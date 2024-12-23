@@ -9,7 +9,7 @@ from functools import partial
 import einops
 
 from jaxtyping import Array, Float, Int, PyTree, PRNGKeyArray
-from typing import Tuple
+from typing import Tuple, Optional
 
 import math
 
@@ -146,7 +146,7 @@ class TransformerEncoder(eqx.Module):
 class ViTAutoencoder(eqx.Module):
     patch_size: int
     image_size: int
-    norm_pix: int
+    norm_pix: bool
     num_patches: int
     patch_embed: eqx.nn.Sequential
     pos_embed: jnp.ndarray
@@ -256,28 +256,56 @@ class ViTAutoencoder(eqx.Module):
                                 p1=self.patch_size, p2=self.patch_size, h=h_patches)
 
     @eqx.filter_jit
+    def normalize_patches(self, patches: Float[Array, "num_patch patch_size_squared"]):
+        def _norm(patches):
+            mean = patches.mean(axis=-1, keepdims=True)
+            var = patches.var(axis=-1, keepdims=True)
+            patches = (patches - mean) / (var + 1e-6)**0.5
+            return patches
+        def _identity(patches):
+            return patches
+        return jax.lax.cond(self.norm_pix, _norm, _identity, patches)
+
+    @eqx.filter_jit
+    def denormalize_patches(self, patches: Float[Array, "num_patch patch_size_squared"], orig_mean: Float[Array, "num_patch 1"], orig_var: Float[Array, "num_patch 1"]):
+        return jax.lax.cond(
+            self.norm_pix,
+            lambda patches: patches * (orig_var + 1e-6)**0.5 + orig_mean,
+            lambda patches: patches,
+            patches
+        )
+
+    @eqx.filter_jit
     def encode(self, x: Float[Array, "c h w"]):
         patches = self.patchify(x)
+
+        # Need original statistics for denormalization
+        orig_mean = patches.mean(axis=-1, keepdims=True)
+        orig_var = patches.var(axis=-1, keepdims=True)
+        patches = self.normalize_patches(patches)
+
         tokens = jax.vmap(self.patch_embed)(patches) + jax.lax.stop_gradient(self.pos_embed) # vmap handles patch dim
                                                                                              # outer vmap handles batch dim
         for encoder_block in self.encoder:
             tokens = tokens + encoder_block(tokens)
         tokens = einops.rearrange(tokens, 't e -> (t e)')
         latent = self.to_latent(tokens)
-        return latent
+
+        return latent, orig_mean, orig_var
 
     @eqx.filter_jit
-    def decode(self, z: Float[Array, "latent_dim"]):
+    def decode(self, z: Float[Array, "latent_dim"], orig_mean: Float[Array, "num_patch 1"], orig_var: Float[Array, "num_patch 1"]):
         tokens = self.from_latent(z)
         tokens = einops.rearrange(tokens, '(t e) -> t e', t=self.num_patches)
         for decoder_block in self.decoder:
             tokens = tokens + decoder_block(tokens)
         patches = jax.vmap(self.to_pixel)(tokens)
+        patches = self.denormalize_patches(patches, orig_mean, orig_var)
         recon = self.unpatchify(patches)
         return recon
 
     @eqx.filter_jit
     def __call__(self, x: Float[Array, "c h w"]):
-        latent = self.encode(x)
-        recon  = self.decode(latent)
+        latent, orig_mean, orig_var = self.encode(x)
+        recon  = self.decode(latent, orig_mean, orig_var)
         return recon
