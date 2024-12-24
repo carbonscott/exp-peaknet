@@ -21,11 +21,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class MultiHeadAttention(eqx.Module):
-    dim: int
-    heads: int
-    dim_head: int
     to_qkv: eqx.nn.Linear
     to_out: eqx.nn.Linear
+    dim: int = eqx.field(static=True)
+    heads: int = eqx.field(static=True)
+    dim_head: int = eqx.field(static=True)
     use_flash: bool = eqx.field(static=True)
 
     def __init__(
@@ -120,9 +120,6 @@ class TransformerBlock(eqx.Module):
         return x
 
 class ViTAutoencoder(eqx.Module):
-    patch_size: int
-    image_size: int
-    num_patches: int
     patch_embed: eqx.nn.Sequential
     pos_embed: jnp.ndarray
     encoder: Tuple[TransformerBlock, ...]
@@ -130,8 +127,11 @@ class ViTAutoencoder(eqx.Module):
     from_latent: eqx.nn.Sequential
     decoder: Tuple[TransformerBlock, ...]
     to_pixel: eqx.nn.Sequential
-    h_patches: int
-    w_patches: int
+    patch_size: int = eqx.field(static=True)
+    image_size: int = eqx.field(static=True)
+    num_patches: int = eqx.field(static=True)
+    h_patches: int = eqx.field(static=True)
+    w_patches: int = eqx.field(static=True)
     norm_pix: bool = eqx.field(static=True)
 
     def __init__(
