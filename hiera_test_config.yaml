@@ -1,0 +1,120 @@
+checkpoint:
+  state_dict_type: sharded
+  chkpt_saving_iterations: 100
+  preempt_metadata_path: preempt/hiera-test
+  preempt_chkpt_saving_iterations: 50
+  directory: experiments/chkpts
+  prefix: hiera-test
+  path_chkpt_prev: null
+  offload_to_cpu: false
+  rank0_only: false
+
+dataset:
+  drop_last_in_sampler: true
+  drop_last_in_loader: true
+  batch_size: 4
+  num_workers: 2
+  pin_memory: true
+  prefetch_factor: 2
+  seg_size: 100
+  path_train: pretrain/train.csv  
+  path_eval: pretrain/eval.csv
+  debug: false
+  cache_size: 10
+  transforms:
+    # First pad to ensure we can always get 512x512 crops
+    H_pad: 1920  # Match your original image size
+    W_pad: 1920  # Match your original image size
+    # Then do variable center cropping to 512x512
+    Hv: 512      # Target height for Hiera
+    Wv: 512      # Target width for Hiera  
+    sigma: 0.33  # Standard deviation for polar sampling (good default)
+    num_crop: 1  # Single crop per image
+    # Data augmentation parameters (reduced for larger patches)
+    num_patch: 25     # Reduced from 50 for 512x512
+    size_patch: 64    # Increased patch size for larger images
+    angle_max: 360
+    frac_shift_max: 0.05  # Reduced shift for larger images
+    var_size_patch: 0.2
+    sampling_fraction: null
+    # Transform pipeline optimized for 512x512 Hiera
+    set:
+      pad: true                # Pad to 1920x1920 first
+      polar_center_crop: true  # Variable center crop to 512x512
+      random_patch: false       # Then apply augmentations
+      random_rotate: false
+      random_shift: false
+      batch_sampler: false
+
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: bfloat16
+  cpu_offload: null
+
+logging:
+  directory: experiments/logs
+  prefix: hiera-test
+  level: INFO
+
+loss:
+  grad_accum_steps: 1
+  focal:
+    alpha: [0.25, 0.75]
+    gamma: 2.0
+
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_iterations: 1000
+  warmup_iterations: 50
+  scheduler_update_iterations: 1
+
+misc:
+  max_epochs: 5
+  max_eval_iter: 10
+  max_eval_retry: 2
+  sharding_stage: zero2
+  compiles_model: false
+  data_dump_on: false
+  cpu_only: false
+  peak_flops_per_sec: 312000000000000.0
+  monitors_dynamics: true
+
+model:
+  from_scratch: true
+  hiera:
+    # Segmentation-specific parameters
+    num_classes: 2
+    decoder_embed_dim: 512
+    decoder_depth: 8
+    decoder_num_heads: 16
+    
+    # Core Hiera architecture parameters (optimized for 512x512 X-ray images)
+    input_size: [512, 512]  # Input image size - scaled up for scientific imaging
+    in_chans: 1  # Single channel for X-ray data (scientific imaging)
+    embed_dim: 96  # Initial embedding dimension
+    num_heads: 1  # Initial number of attention heads
+    stages: [2, 3, 16, 3]  # Number of blocks per stage
+    q_pool: 2  # Number of q_pool stages (reduces spatial resolution)
+    q_stride: [2, 2]  # Query pooling stride
+    mask_unit_size: [16, 16]  # Mask unit size scaled for 512x512 (8 * 512/224 ≈ 18, use 16)
+    mask_unit_attn: [true, true, false, false]  # Which stages use mask unit attention
+    dim_mul: 2.0  # Dimension multiplier between stages
+    head_mul: 2.0  # Head multiplier between stages
+    patch_kernel: [7, 7]  # Patch embedding kernel size
+    patch_stride: [4, 4]  # Patch embedding stride (creates 128x128 = 16,384 tokens)
+    patch_padding: [3, 3]  # Patch embedding padding
+    mlp_ratio: 4.0  # MLP expansion ratio
+    drop_path_rate: 0.1  # Stochastic depth rate (increased slightly for regularization)
+    norm_layer: "LayerNorm"  # Normalization layer type
+    head_dropout: 0.0  # Classification head dropout
+    head_init_scale: 0.001  # Head initialization scale
+    sep_pos_embed: false  # Use separate positional embeddings for temporal dimension
+
+optim:
+  grad_clip: 1.0
+  lr: 1e-4
+  weight_decay: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  fused: false
