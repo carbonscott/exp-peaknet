@@ -79,6 +79,18 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+# -- Configure optimal thread count for distributed training
+# This prevents OMP_NUM_THREADS warning and optimizes performance
+if 'OMP_NUM_THREADS' not in os.environ:
+    # Calculate optimal thread count: total CPU cores / number of processes per node
+    # For distributed training, we want to avoid oversubscription
+    total_cores = os.cpu_count() or 4
+    # Assume 2 processes per node for distributed training (adjust based on your setup)
+    processes_per_node = int(os.environ.get('LOCAL_WORLD_SIZE', '2'))
+    optimal_threads = max(1, total_cores // processes_per_node)
+    torch.set_num_threads(optimal_threads)
+    print(f"Set optimal thread count: {optimal_threads} (total_cores={total_cores}, processes_per_node={processes_per_node})")
+
 # -- Distributed Data Parallel (DDP)
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -92,11 +104,8 @@ from torch.distributed.fsdp import (
     CPUOffload,
 )
 
-# --- Policy wrapper
-from torch.distributed.fsdp.wrap import (
-    transformer_auto_wrap_policy,
-    lambda_auto_wrap_policy,
-)
+# --- Policy wrapper (using modern ModuleWrapPolicy via utilities)
+# Note: ModuleWrapPolicy is used in peaknet.utils.fsdp.shard_layers
 from packaging import version
 
 # --- Scaler for float16
