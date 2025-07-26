@@ -29,7 +29,7 @@ export TRANSFORMERS_CACHE={{ transformers_cache }}
 
 export OMP_NUM_THREADS={{ OMP_NUM_THREADS }}
 export NCCL_DEBUG=INFO
-export TORCH_NCCL_BLOCKING_WAIT=1
+export TORCH_NCCL_BLOCKING_WAIT=0
 
 # Set up a meta checkpoint file
 export PREEMPT_ROOT="preempt"
