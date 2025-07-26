@@ -1,7 +1,3 @@
-# DEPRECATED: This config is for backward compatibility only.  
-# NEW USERS: Use the unified launcher with hydra_config/scheduler_configs/ and hydra_config/resource_configs/
-# See: launch_unified.py and hydra_config/scheduler_configs/s3df.yaml
-
 walltime           : "12:00"
 job                : "job_name"
 num_nodes          : 1

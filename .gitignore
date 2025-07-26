@@ -1,0 +1,82 @@
+# Generated job scripts and configs
+experiments/jobs/
+experiments/yaml/
+experiments/hydra/
+experiments/bsub/
+experiments/sbatch/
+
+# Preemptive checkpoint metadata
+preempt/
+
+# Python cache and compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Cache files
+.cache/
+global_index_cache_*.pkl
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary and swap files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Log files
+*.log
+logs/
+slurm/
+lsf/
+
+# Profiling and debugging output
+*.profile
+nsight_reports/
+*.nsys-rep
+*.sqlite
+
+# Data and model files (typically large)
+*.h5
+*.hdf5
+*.safetensors
+*.pt
+*.pth
+*.pickle
+*.pkl
+weights/
+checkpoints/
+chkpt_*/
+
+# Output directories
+*_output/
+data_dump/
+streams/
+cxi_output/
+cxidb/
+indexamajig_results/
+inference_log/
+
+# Temporary data files
+*.npy
+*.csv
+*.dat
+*.pdf
+*.png
+*.html
+tmp*
+junk*
+
+# System files
+.vscode/
+.idea/
+*.iml

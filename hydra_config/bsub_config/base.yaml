@@ -1,3 +1,7 @@
+# DEPRECATED: This config is for backward compatibility only.
+# NEW USERS: Use the unified launcher with hydra_config/scheduler_configs/ and hydra_config/resource_configs/
+# See: launch_unified.py and hydra_config/scheduler_configs/summit.yaml
+
 qos                : "batch"
 walltime           : "1:00"
 job                : "job_name"

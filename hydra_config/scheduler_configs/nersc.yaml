@@ -1,0 +1,15 @@
+# NERSC Perlmutter SLURM Configuration  
+walltime: "12:00:00"
+job: "job_name"
+num_nodes: 1
+num_gpus_per_node: 4
+num_cpus_per_task: 2
+qos: "regular"
+trainer: 'train_hiera_seg.py'
+yaml_config: 'base.yaml'
+OMP_NUM_THREADS: 1
+transformers_cache: $HOME/.cache/huggingface
+account: "lcls_g"
+constraint: "gpu"
+launcher_cmd: "srun bash -c"
+conda_env: "/global/u2/c/cwang31/data_root/conda/envs/p310"

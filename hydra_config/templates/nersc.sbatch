@@ -1,9 +1,4 @@
 #!/bin/bash
-#
-# DEPRECATED: This template is for backward compatibility only.
-# NEW USERS: Use the unified launcher with templates in hydra_config/templates/
-# See: launch_unified.py and hydra_config/templates/nersc.sbatch
-#
 #SBATCH --output=slurm/%j.log
 #SBATCH --error=slurm/%j.err
 #SBATCH --account lcls_g

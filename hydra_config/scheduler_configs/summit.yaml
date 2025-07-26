@@ -1,0 +1,13 @@
+# ORNL Summit LSF Configuration
+qos: "batch"
+walltime: "1:00"
+job: "job_name"
+num_nodes: 1
+trainer: 'train_hiera_seg.py'
+yaml_config: 'base.yaml'
+OMP_NUM_THREADS: 1
+transformers_cache: $HOME/.cache/huggingface
+num_gpus_per_node: 2
+num_cpus_per_rs: 2
+project: "CSC555"
+launcher_cmd: "jsrun --rs_per_host {{ num_gpus_per_node }} --tasks_per_rs 1 --cpu_per_rs {{ num_cpus_per_rs }} --gpu_per_rs 1 --latency_priority gpu-gpu --launch_distribution packed"

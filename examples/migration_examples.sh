@@ -1,0 +1,86 @@
+#!/bin/bash
+#
+# Migration Examples: Old vs New Launcher Syntax
+#
+
+echo "🔄 Migration Examples: Old vs New Launcher Syntax"
+echo "================================================="
+
+echo ""
+echo "📊 Comparison Table:"
+echo "+------------------+-------------------------+---------------------------+"
+echo "| Aspect           | OLD (Legacy)            | NEW (Unified)             |"
+echo "+------------------+-------------------------+---------------------------+"
+echo "| Launcher         | Multiple scripts        | Single launch_unified.py |"
+echo "| Facility Support| Manual selection        | Auto-generates all       |"
+echo "| Config Naming    | sbatch_config=hiera     | resource_configs=hiera    |"
+echo "| Output           | Single facility         | All facilities            |"
+echo "+------------------+-------------------------+---------------------------+"
+
+echo ""
+echo "🔧 LEGACY APPROACH (still works, but deprecated):"
+echo "================================================"
+
+echo ""
+echo "# For SLURM systems (S3DF, NERSC):"
+echo "python launch_sbatch_job.py \\"
+echo "    job=my-job \\"
+echo "    sbatch_config=hiera \\"
+echo "    train_config=hiera \\"
+echo "    auto_submit=false"
+
+echo ""
+echo "# For LSF systems (ORNL Summit):"
+echo "python launch_job.py \\"
+echo "    job=my-job \\"
+echo "    bsub_config=base \\"
+echo "    train_config=hiera \\"
+echo "    auto_submit=false"
+
+echo ""
+echo "🆕 NEW UNIFIED APPROACH (recommended):"
+echo "====================================="
+
+echo ""
+echo "# Single launcher for ALL facilities:"
+echo "python launch_unified.py \\"
+echo "    job=my-job \\"
+echo "    resource_configs=hiera \\"
+echo "    train_config=hiera \\"
+echo "    auto_submit=false"
+
+echo ""
+echo "✨ Key Benefits of New Approach:"
+echo "- ✅ Single launcher works everywhere"
+echo "- ✅ Auto-generates scripts for all facilities"
+echo "- ✅ Future-proof: add facilities by adding templates"
+echo "- ✅ Clear naming: resource_configs vs sbatch_config"
+echo "- ✅ Backward compatible: old scripts still work"
+
+echo ""
+echo "🚀 Migration Steps:"
+echo "=================="
+echo "1. Replace launcher script:"
+echo "   launch_sbatch_job.py → launch_unified.py"
+echo ""
+echo "2. Update config parameter:"
+echo "   sbatch_config=hiera → resource_configs=hiera"
+echo ""
+echo "3. Enjoy multi-facility support!"
+echo "   Old: generates 1 script for 1 facility"
+echo "   New: generates scripts for ALL facilities"
+
+echo ""
+echo "📝 Real Migration Example:"
+echo "========================="
+
+echo ""
+echo "# OLD (S3DF specific):"
+echo "python launch_sbatch_job.py job=experiment1 sbatch_config=hiera train_config=hiera"
+echo ""
+echo "# NEW (all facilities):"
+echo "python launch_unified.py job=experiment1 resource_configs=hiera train_config=hiera"
+
+echo ""
+echo "💡 The new approach generates scripts for S3DF, NERSC, AND Summit automatically!"
+echo "   You just submit the one that works on your current system."

@@ -1,0 +1,13 @@
+walltime           : "48:00:00"  # Long walltime for 10M steps
+job                : "hiera-ddp-training"
+num_nodes          : 1
+num_tasks          : 10  # Use all 10 GPUs
+partition          : ada
+qos                : ""
+trainer            : 'train_hiera_seg.py'  # Use Hiera segmentation trainer
+yaml_config        : 'hiera-ddp-training.yaml'
+OMP_NUM_THREADS    : 1
+transformers_cache : $HOME/.cache/huggingface
+num_gpus_per_node  : 10  # All GPUs on the node
+num_cpus_per_task  : 2   # Conservative CPU allocation
+exclude_nodes      : ""

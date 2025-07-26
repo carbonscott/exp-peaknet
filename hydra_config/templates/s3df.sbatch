@@ -1,9 +1,4 @@
 #!/bin/bash
-#
-# DEPRECATED: This template is for backward compatibility only.
-# NEW USERS: Use the unified launcher with templates in hydra_config/templates/
-# See: launch_unified.py and hydra_config/templates/s3df.sbatch
-#
 #SBATCH --output=slurm/{{ job }}.%j.log    # File to which STDOUT will be written, %j inserts jobid
 #SBATCH --error=slurm/{{ job }}.%j.err     # File to which STDERR will be written, %j inserts jobid
 #SBATCH --account lcls:prjdat21         # Check it in your Iris portal: https://iris.nersc.gov

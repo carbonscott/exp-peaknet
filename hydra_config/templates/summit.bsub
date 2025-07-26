@@ -1,9 +1,4 @@
 #!/bin/bash
-#
-# DEPRECATED: This template is for backward compatibility only.
-# NEW USERS: Use the unified launcher with templates in hydra_config/templates/
-# See: launch_unified.py and hydra_config/templates/summit.bsub
-#
 #BSUB -o lsf/%J.log
 #BSUB -e lsf/%J.err
 #BSUB -q {{ qos }}

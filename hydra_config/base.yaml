@@ -1,26 +1,36 @@
 defaults:
   - _self_
-  - bsub_config   : base
-  - train_config  : base
-  - distill_config: base
-  - sbatch_config : base
-  - exp_mfu       : base
+  - bsub_config     : base      # DEPRECATED: Use launch_unified.py instead
+  - train_config    : base
+  - distill_config  : base
+  - sbatch_config   : base      # DEPRECATED: Use launch_unified.py instead
+  - resource_configs: base      # NEW: Resource specifications (compute requirements)
+  - exp_mfu         : base
 
 auto_submit: false
 job: my_job
 skip_preempt: false
+target_facility: null  # Optional: specify facility for auto_submit (s3df, nersc, summit)
+trainer: 'train_hiera_seg.py'  # Default trainer script
 
 path:
-  dir_bsub_template    : 'hydra_config/bsub_config'
-  file_bsub_template   : 'template.bsub'
-  dir_bsub_jobs        : 'experiments/bsub'
-  file_bsub_job        : 'base.bsub'
-  dir_sbatch_template  : 'hydra_config/sbatch_config'
-  file_sbatch_template : 'template.sbatch'
-  dir_sbatch_jobs      : 'experiments/sbatch'
-  file_sbatch_job      : 'base.sbatch'
-  dir_yaml_jobs        : 'experiments/yaml'
-  file_yaml_job        : 'base.yaml'
+  # LEGACY PATHS (for backward compatibility with old launch scripts)
+  dir_bsub_template    : 'hydra_config/bsub_config'      # DEPRECATED: Use dir_templates
+  file_bsub_template   : 'template.bsub'                 # DEPRECATED: Use dir_templates
+  dir_bsub_jobs        : 'experiments/bsub'              # DEPRECATED: Use dir_job_scripts
+  file_bsub_job        : 'base.bsub'                     # DEPRECATED: Use dir_job_scripts
+  dir_sbatch_template  : 'hydra_config/sbatch_config'    # DEPRECATED: Use dir_templates
+  file_sbatch_template : 'template.sbatch'               # DEPRECATED: Use dir_templates
+  dir_sbatch_jobs      : 'experiments/sbatch'            # DEPRECATED: Use dir_job_scripts
+  file_sbatch_job      : 'base.sbatch'                   # DEPRECATED: Use dir_job_scripts
+  
+  # NEW UNIFIED PATHS (used by launch_unified.py)
+  dir_templates        : 'hydra_config/templates'        # Multi-facility job templates
+  dir_scheduler_configs: 'hydra_config/scheduler_configs' # Facility-specific settings (s3df, nersc, summit)
+  dir_resource_configs : 'hydra_config/resource_configs'  # Resource requirements (compute specs)
+  dir_yaml_jobs        : 'experiments/yaml'              # Generated YAML configs
+  dir_job_scripts      : 'experiments/jobs'              # Generated job scripts (<job>.<facility>.<scheduler>)
+  file_yaml_job        : 'base.yaml'                     # Default YAML filename
 
 hydra:
   run:
