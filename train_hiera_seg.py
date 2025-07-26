@@ -743,7 +743,7 @@ try:
             # Log step counter increment for verification
             if dist_rank == 0:
                 logger.info(f"[STEP] Step counter incremented to {step_counter} after parameter update")
-                logger.info(f"[LOSS PRECISION] Step {step_counter}: loss={loss:.10f} (high precision for continuity testing)")
+                logger.info(f"[LOSS] Step {step_counter}: loss={loss:.10f}")
 
             # Update scheduler
             if is_action_due(step_counter, scheduler_update_steps):
