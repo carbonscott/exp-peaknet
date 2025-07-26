@@ -93,7 +93,7 @@ if 'OMP_NUM_THREADS' not in os.environ:
     processes_per_node = int(os.environ.get('LOCAL_WORLD_SIZE', '2'))
     optimal_threads = max(1, total_cores // processes_per_node)
     torch.set_num_threads(optimal_threads)
-    print(f"Set optimal thread count: {optimal_threads} (total_cores={total_cores}, processes_per_node={processes_per_node})")
+    logger.info(f"Set optimal thread count: {optimal_threads} (total_cores={total_cores}, processes_per_node={processes_per_node})")
 
 # -- Distributed Data Parallel (DDP)
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -547,7 +547,6 @@ if dist_rank == 0:
 # ----------------------------------------------------------------------- #
 #  CRITERION (LOSS)
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring criterion...')
 criterion = CategoricalFocalLoss(
     alpha       = focal_alpha,
     gamma       = focal_gamma,
@@ -576,7 +575,6 @@ scheduler = CosineLRScheduler(optimizer = optimizer,
 # ----------------------------------------------------------------------- #
 #  CHECKPOINT POST FSDP
 # ----------------------------------------------------------------------- #
-print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
 starting_step = 0
 loss_min = float('inf')  # eval validation loss
