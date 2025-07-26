@@ -59,8 +59,6 @@ import logging
 import peaknet.utils.logger as logger_utils
 from peaknet.utils.data        import wrap_with_torch_dataloader, create_infinite_dataloader
 from peaknet.utils.timestamp   import (
-    extract_timestamp_from_checkpoint,
-    parse_step_from_checkpoint,
     broadcast_timestamp_to_all_ranks,
 )
 from peaknet.lr_scheduler      import CosineLRScheduler
@@ -146,8 +144,6 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------- #
 parser = argparse.ArgumentParser(description = "Load training configuration from a YAML file to a dictionary.")
 parser.add_argument("yaml_file", help="Path to the YAML file")
-parser.add_argument("--resume_from_checkpoint", type=str, default=None, 
-                   help="Path to checkpoint folder to resume from")
 args = parser.parse_args()
 
 # ----------------------------------------------------------------------- #
@@ -329,7 +325,7 @@ if dist_rank == 0:
 # ----------------------------------------------------------------------- #
 #  DATASET
 # ----------------------------------------------------------------------- #
-logger.debug('Configuring dataset...')
+logger.info('Configuring dataset...')
 # -- Seeding
 base_seed  = 0
 world_seed = base_seed + seed_offset
@@ -391,49 +387,23 @@ dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
 custom_collate = None
 
 # ----------------------------------------------------------------------- #
-#  TIMESTAMP GENERATION AND RESUMPTION
+#  TIMESTAMP
 # ----------------------------------------------------------------------- #
-starting_step = 0
-loss_min = float('inf')
-run_timestamp = None
+# Generate fresh timestamp for each run session (like train.fsdp.py)
+if dist_rank == 0:
+    run_timestamp = time.strftime("%Y_%m%d_%H%M")
+else:
+    run_timestamp = None
+# Broadcast timestamp to all ranks for consistency
+run_timestamp = broadcast_timestamp_to_all_ranks(run_timestamp, dist_rank, uses_dist)
 
-# Determine if we're resuming and extract timestamp + step
-if args.resume_from_checkpoint:
-    # Explicit resumption from any checkpoint type
-    starting_step = parse_step_from_checkpoint(args.resume_from_checkpoint) + 1
-    run_timestamp = extract_timestamp_from_checkpoint(args.resume_from_checkpoint)
-    if not run_timestamp:
-        # Fallback to current time if timestamp can't be parsed
-        run_timestamp = time.strftime("%Y_%m%d_%H%M")
-        if dist_rank == 0:
-            logger.warning(f"Could not extract timestamp from {args.resume_from_checkpoint}, using current time")
-elif preempt_metadata_path and os.path.exists(preempt_metadata_path):
-    # Auto-resume from latest preemptive checkpoint
-    try:
-        with open(preempt_metadata_path, 'r') as f:
-            preempt_checkpoint_path = f.read().strip()
-        if os.path.exists(preempt_checkpoint_path):
-            args.resume_from_checkpoint = preempt_checkpoint_path  # Set for later use
-            starting_step = parse_step_from_checkpoint(preempt_checkpoint_path) + 1
-            run_timestamp = extract_timestamp_from_checkpoint(preempt_checkpoint_path)
-            if dist_rank == 0:
-                logger.info(f"Auto-resuming from preemptive checkpoint: {preempt_checkpoint_path}")
-    except Exception as e:
-        if dist_rank == 0:
-            logger.warning(f"Failed to read preemptive metadata from {preempt_metadata_path}: {e}")
-
-# Generate new timestamp if this is a fresh run
-if run_timestamp is None:
-    if dist_rank == 0:
-        run_timestamp = time.strftime("%Y_%m%d_%H%M")
-    else:
-        run_timestamp = None
-    # Broadcast timestamp to all ranks for consistency
-    run_timestamp = broadcast_timestamp_to_all_ranks(run_timestamp, dist_rank, uses_dist)
+# Simple config-driven resumption (like train.fsdp.py)
+from_resume = path_chkpt_prev is not None
 
 if dist_rank == 0:
     logger.info(f"Run timestamp: {run_timestamp}")
-    logger.info(f"Starting from step: {starting_step}")
+    if from_resume:
+        logger.info(f"Will resume from: {path_chkpt_prev}")
 
 # ----------------------------------------------------------------------- #
 #  CHECKPOINT PRE FSDP
@@ -446,13 +416,12 @@ checkpointer = init_checkpointer(
     offload_to_cpu=chkpt_offload_to_cpu,
     rank0_only=chkpt_rank0_only
 )
-from_resume = args.resume_from_checkpoint is not None
 
 # ----------------------------------------------------------------------- #
 #  MODEL
 # ----------------------------------------------------------------------- #
 # -- Config the model with explicit parameters
-logger.debug('Configuring model...')
+logger.info('Configuring model...')
 model = HieraSegmentation(
     # Segmentation-specific parameters
     num_classes=num_classes,
@@ -497,11 +466,11 @@ if version.parse(torch_version) <= version.parse("2.0.1"):
             param.requires_grad = True
 
 if dist_rank == 0:
-    logger.debug(f"{sum(p.numel() for p in model.parameters())/1e6} M parameters.")
+    logger.info(f"[MODEL SETUP] {sum(p.numel() for p in model.parameters())/1e6} M parameters.")
 
 if from_resume:
     if hasattr(checkpointer, 'pre_dp_load'):
-        checkpointer.pre_dp_load(dist_rank, model, args.resume_from_checkpoint)
+        checkpointer.pre_dp_load(dist_rank, model, path_chkpt_prev)
 
 # -- Mixed precision
 mixed_precision_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dist_dtype]
@@ -524,7 +493,7 @@ else:
 
 # -- Compile the model
 if compiles_model:
-    logger.debug("Compiling the model...")
+    logger.info("[MODEL SETUP] Compiling the model...")
     model = torch.compile(model) # requires PyTorch 2.0
 
 # -- Wrapping the model with FSDP or DDP based on sharding strategy
@@ -547,13 +516,13 @@ if uses_dist:
             device_id         = device,
         )
         param_count = sum(p.numel() for p in model.parameters())
-        logger.debug(f"FSDP sharded parameter count: {param_count*1e-6} M.")
+        logger.info(f"[MODEL SETUP] FSDP sharded parameter count: {param_count*1e-6} M.")
     else:
         # Wrap with DDP (when sharding_stage = 'zero0')
         model.to(device)
         model = DDP(model, device_ids=[dist_local_rank])
         param_count = sum(p.numel() for p in model.parameters())
-        logger.debug(f"DDP parameter count: {param_count*1e-6} M.")
+        logger.info(f"[MODEL SETUP] DDP parameter count: {param_count*1e-6} M.")
 
     dist.barrier()
 else:
@@ -568,7 +537,7 @@ grad_sync_context = lambda enables_sync: nullcontext() if enables_sync or not us
 act_chkpt(model, (HieraBlock,))
 
 if dist_rank == 0:
-    logger.debug(f"Current timestamp: {timestamp}")
+    logger.info(f"Current timestamp: {timestamp}")
 
 # ----------------------------------------------------------------------- #
 #  CRITERION (LOSS)
@@ -584,7 +553,7 @@ criterion = CategoricalFocalLoss(
 # ----------------------------------------------------------------------- #
 #  OPTIMIZER AND SCHEDULER
 # ----------------------------------------------------------------------- #
-logger.debug('Configuring optimizer...')
+logger.info('Configuring optimizer...')
 param_iter = model.parameters()
 optim_arg_dict = dict(
     lr           = lr,
@@ -605,6 +574,8 @@ scheduler = CosineLRScheduler(optimizer = optimizer,
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
+starting_step = 0
+loss_min = float('inf')
 step_state = dict(
     step        = starting_step,
     loss_min    = loss_min,
@@ -614,16 +585,16 @@ step_state = dict(
 # -- Optional resumption
 if from_resume:
     if hasattr(checkpointer, 'post_dp_load'):
-        # Optimizer, scheduler are loaded
-        checkpointer.post_dp_load(dist_rank, model, optimizer, scheduler, step_state, args.resume_from_checkpoint)
+        # Load model, optimizer, scheduler, and step_state from checkpoint
+        checkpointer.post_dp_load(dist_rank, model, optimizer, scheduler, step_state, path_chkpt_prev)
 
-        # Training state
+        # Extract training state from loaded checkpoint data (not filename!)
+        starting_step = step_state.get("step", 0) + 1  # Resume from next step
         loss_min = step_state.get("loss_min", loss_min)
 
-        # Log checkpoint loading with smart utility for visibility
-        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION VERIFICATION] Loading from checkpoint -- {args.resume_from_checkpoint}", "info")
-        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION VERIFICATION] Parsed starting_step: {starting_step}, loss_min: {loss_min}", "info")
-        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION VERIFICATION] Extracted timestamp: {run_timestamp}", "info")
+        # Log resumption info
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Loading from checkpoint -- {path_chkpt_prev}", "info")
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Resuming from step: {starting_step-1}-->{starting_step} , loss_min: {loss_min}", "info")
 
 
 # ----------------------------------------------------------------------- #
@@ -655,7 +626,7 @@ num_flops_per_token = estimate_flops_per_token(model, dummy_shape, hiera_patch_s
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
 batch_input_shape = None
-logger.debug('Ready for step-based training loop...')
+logger.info('Ready for the training loop...')
 
 # Initialize step counter from resumption
 step_counter = starting_step
@@ -675,11 +646,11 @@ infinite_dataloader, sampler, batches_per_epoch = create_infinite_dataloader(
 
 if dist_rank == 0:
     logger.info(f"Training for {total_steps} total steps (starting from step {starting_step})")
-    logger.info(f"[TRAINING VERIFICATION] Run timestamp: {run_timestamp}")
-    logger.info(f"[TRAINING VERIFICATION] Checkpoint saving every {chkpt_saving_steps} steps")
-    logger.info(f"[TRAINING VERIFICATION] Scheduler update every {scheduler_update_steps} steps")
-    logger.info(f"[TRAINING VERIFICATION] Gradient accumulation steps: {grad_accum_steps}")
-    logger.info(f"[TRAINING VERIFICATION] Batches per epoch: {batches_per_epoch}")
+    logger.info(f"[TRAINING] Run timestamp: {run_timestamp}")
+    logger.info(f"[TRAINING] Checkpoint saving every {chkpt_saving_steps} steps")
+    logger.info(f"[TRAINING] Scheduler update every {scheduler_update_steps} steps")
+    logger.info(f"[TRAINING] Gradient accumulation steps: {grad_accum_steps}")
+    logger.info(f"[TRAINING] Batches per epoch: {batches_per_epoch}")
 
 try:
     model.train()
@@ -689,7 +660,7 @@ try:
     batch_idx = 0
 
     if dist_rank == 0:
-        logger.info(f"[TRAINING VERIFICATION] Starting step-based training loop from step {starting_step}")
+        logger.info(f"[TRAINING] Starting step-based training loop from step {starting_step}")
 
     # [PERFORMANCE] Start memory monitoring
     if dist_local_rank == 0:
@@ -744,7 +715,7 @@ try:
             # Log gradient sync event for verification
             if dist_rank == 0:
                 sync_reason = "epoch_boundary" if is_last_batch_of_epoch else "grad_accum_complete"
-                logger.debug(f"[GRADIENT SYNC] Triggered by {sync_reason} at batch_idx={batch_idx}, grad_nosync_counter={grad_nosync_counter}")
+                logger.info(f"[GRADIENT SYNC] Triggered by {sync_reason} at batch_idx={batch_idx}, grad_nosync_counter={grad_nosync_counter}")
 
             # Gradient clipping and optimizer step
             if grad_clip > 0.0:
@@ -771,18 +742,18 @@ try:
 
             # Log step counter increment for verification
             if dist_rank == 0:
-                logger.info(f"[STEP VERIFICATION] Step counter incremented to {step_counter} after parameter update")
+                logger.info(f"[STEP] Step counter incremented to {step_counter} after parameter update")
                 logger.info(f"[LOSS PRECISION] Step {step_counter}: loss={loss:.10f} (high precision for continuity testing)")
 
             # Update scheduler
             if is_action_due(step_counter, scheduler_update_steps):
                 if dist_rank == 0:
-                    logger.info(f"[SCHEDULER VERIFICATION] Scheduler update triggered at step {step_counter}")
+                    logger.info(f"[SCHEDULER] Scheduler update triggered at step {step_counter}")
                 scheduler.step()
                 if dist_rank == 0:
                     current_lrs = scheduler.get_lr()
                     current_lrs_msg = ",".join(f"{lr}" for lr in current_lrs)
-                    logger.info(f"[SCHEDULER VERIFICATION] lr updated to {current_lrs_msg} at step {step_counter}")
+                    logger.info(f"[SCHEDULER] lr updated to {current_lrs_msg} at step {step_counter}")
 
             # Logging (only on main process)
             if dist_rank == 0 and step_counter % 10 == 0:
@@ -798,8 +769,8 @@ try:
             # Checkpointing
             if is_action_due(step_counter, chkpt_saving_steps):
                 if dist_rank == 0:
-                    logger.info(f"[CHECKPOINT VERIFICATION] Checkpoint triggered at step {step_counter}")
-                    logger.info(f"[CHECKPOINT VERIFICATION] Expected checkpoint name: {fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}")
+                    logger.info(f"[CHECKPOINT] Checkpoint triggered at step {step_counter}")
+                    logger.info(f"[CHECKPOINT] Expected checkpoint name: {fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}")
 
                 # Evaluation
                 model.eval()
@@ -907,12 +878,12 @@ try:
                     best_output_path = os.path.join(dir_root_chkpt, best_output_dir)
 
                     if dist_rank == 0:
-                        logger.info(f"[CHECKPOINT VERIFICATION] Saving BEST checkpoint: {best_output_dir}")
+                        logger.info(f"[CHECKPOINT] Saving BEST checkpoint: {best_output_dir}")
 
                     checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, best_output_path)
 
                     if dist_rank == 0:
-                        logger.info(f"[CHECKPOINT VERIFICATION] BEST checkpoint saved successfully: {best_output_dir} (val_loss={eval_loss:.6f})")
+                        logger.info(f"[CHECKPOINT] BEST checkpoint saved successfully: {best_output_dir} (val_loss={eval_loss:.6f})")
 
 
                 model.train()  # Back to training mode
@@ -923,11 +894,11 @@ try:
                 step_state["loss_min"] = loss_min
                 step_state["timestamp"] = run_timestamp
 
-                preempt_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}.preempt"
+                preempt_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}.preempt"
                 preempt_output_path = os.path.join(dir_root_chkpt, preempt_output_dir)
 
                 if dist_rank == 0:
-                    logger.info(f"[CHECKPOINT VERIFICATION] Saving PREEMPTIVE checkpoint: {preempt_output_dir}")
+                    logger.info(f"[CHECKPOINT] Saving PREEMPTIVE checkpoint: {preempt_output_dir}")
 
                 checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, preempt_output_path)
 
@@ -935,13 +906,13 @@ try:
                 if dist_rank == 0:
                     with open(preempt_metadata_path, "w") as f:
                         f.write(preempt_output_path)
-                    logger.info(f"[CHECKPOINT VERIFICATION] PREEMPTIVE checkpoint saved: {preempt_output_dir}")
-                    logger.info(f"[CHECKPOINT VERIFICATION] Preemptive metadata written to: {preempt_metadata_path}")
+                    logger.info(f"[CHECKPOINT] PREEMPTIVE checkpoint saved: {preempt_output_dir}")
+                    logger.info(f"[CHECKPOINT] Preemptive metadata written to: {preempt_metadata_path}")
 
     # Training completed
     if dist_rank == 0:
-        logger.info(f"[TRAINING VERIFICATION] Training completed after {step_counter} steps")
-        logger.info(f"[TRAINING VERIFICATION] Final loss_min: {loss_min}")
+        logger.info(f"[TRAINING] Training completed after {step_counter} steps")
+        logger.info(f"[TRAINING] Final loss_min: {loss_min}")
 
 except KeyboardInterrupt:
     logger_utils.log_on_all_ranks(logger, "Training was interrupted!", "error")
