@@ -325,7 +325,6 @@ if dist_rank == 0:
 # ----------------------------------------------------------------------- #
 #  DATASET
 # ----------------------------------------------------------------------- #
-logger.info('Configuring dataset...')
 # -- Seeding
 base_seed  = 0
 world_seed = base_seed + seed_offset
@@ -349,6 +348,11 @@ pre_transforms = (
 )
 transforms = None
 
+# -- Set up cache directory and path
+cache_dir = "experiments/cache"
+os.makedirs(cache_dir, exist_ok=True)
+global_index_cache_path = f"{cache_dir}/{fl_chkpt_prefix}_global_index_cache.pkl"
+
 # -- Set up training set
 dataset_train_config = PeakNetDatasetConfig(
     path_csv=path_dataset_train,
@@ -361,6 +365,7 @@ dataset_train_config = PeakNetDatasetConfig(
     uses_norm=True,
     scales_variance=True,
     perfs_runtime=False,
+    global_index_cache=global_index_cache_path,
 )
 dataset_train = PeakNetDataset(dataset_train_config)
 
@@ -380,6 +385,7 @@ dataset_eval_val_config = PeakNetDatasetConfig(
     uses_norm=True,
     scales_variance=True,
     perfs_runtime=False,
+    global_index_cache=global_index_cache_path,
 )
 dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
 
@@ -421,7 +427,6 @@ checkpointer = init_checkpointer(
 #  MODEL
 # ----------------------------------------------------------------------- #
 # -- Config the model with explicit parameters
-logger.info('Configuring model...')
 model = HieraSegmentation(
     # Segmentation-specific parameters
     num_classes=num_classes,
@@ -553,7 +558,6 @@ criterion = CategoricalFocalLoss(
 # ----------------------------------------------------------------------- #
 #  OPTIMIZER AND SCHEDULER
 # ----------------------------------------------------------------------- #
-logger.info('Configuring optimizer...')
 param_iter = model.parameters()
 optim_arg_dict = dict(
     lr           = lr,
@@ -626,7 +630,6 @@ num_flops_per_token = estimate_flops_per_token(model, dummy_shape, hiera_patch_s
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
 batch_input_shape = None
-logger.info('Ready for the training loop...')
 
 # Initialize step counter from resumption
 step_counter = starting_step
@@ -660,7 +663,7 @@ try:
     batch_idx = 0
 
     if dist_rank == 0:
-        logger.info(f"[TRAINING] Starting step-based training loop from step {starting_step}")
+        logger.info(f"[TRAINING] Starting training loop from step {starting_step}")
 
     # [PERFORMANCE] Start memory monitoring
     if dist_local_rank == 0:
