@@ -170,7 +170,6 @@ path_dataset_eval      = config.dataset.path_eval
 drop_last_in_sampler   = config.dataset.drop_last_in_sampler
 drop_last_in_loader    = config.dataset.drop_last_in_loader
 batch_size             = config.dataset.batch_size
-seg_size               = config.dataset.seg_size
 num_workers            = config.dataset.num_workers
 pin_memory             = config.dataset.pin_memory
 prefetch_factor        = config.dataset.prefetch_factor
