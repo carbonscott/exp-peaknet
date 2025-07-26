@@ -83,6 +83,7 @@ from peaknet.utils.eval import estimate_loss
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from einops import rearrange
 
 # -- Configure optimal thread count for distributed training
 # This prevents OMP_NUM_THREADS warning and optimizes performance
@@ -699,7 +700,7 @@ try:
             continue
 
         # Process batch data
-        batch_data = torch.cat(batch_data, dim=0)  # (2*B, C, H, W)
+        batch_data = rearrange(batch_data, 'n b c h w -> (n b) c h w')  # (2*B, C, H, W)
         batch_data = batch_data.to(device, non_blocking=True, dtype=mixed_precision_dtype)
 
         # Apply transforms
@@ -708,9 +709,7 @@ try:
                 batch_data = trans(batch_data)
 
         # Split input and target
-        current_batch_size = batch_data.size(0) // 2
-        batch_input = batch_data[:current_batch_size]
-        batch_target = batch_data[current_batch_size:]
+        batch_input, batch_target = rearrange(batch_data, '(n b) c h w -> n b c h w', n=2)
 
         # Binarize labels
         if transforms is not None:
@@ -907,21 +906,6 @@ try:
                     if dist_rank == 0:
                         logger.info(f"[CHECKPOINT VERIFICATION] BEST checkpoint saved successfully: {best_output_dir} (val_loss={eval_loss:.6f})")
 
-                # Regular checkpoint with unified naming
-                step_state["step"] = step_counter
-                step_state["loss_min"] = loss_min
-                step_state["timestamp"] = run_timestamp
-
-                regular_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}"
-                regular_output_path = os.path.join(dir_root_chkpt, regular_output_dir)
-
-                if dist_rank == 0:
-                    logger.info(f"[CHECKPOINT VERIFICATION] Saving REGULAR checkpoint: {regular_output_dir}")
-
-                checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, regular_output_path)
-
-                if dist_rank == 0:
-                    logger.info(f"[CHECKPOINT VERIFICATION] REGULAR checkpoint saved successfully: {regular_output_dir}")
 
                 model.train()  # Back to training mode
 
