@@ -579,7 +579,7 @@ scheduler = CosineLRScheduler(optimizer = optimizer,
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
 starting_step = 0
-loss_min = float('inf')
+loss_min = float('inf')  # eval validation loss
 step_state = dict(
     step        = starting_step,
     loss_min    = loss_min,
@@ -598,7 +598,7 @@ if from_resume:
 
         # Log resumption info
         logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Loading from checkpoint -- {path_chkpt_prev}", "info")
-        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Resuming from step: {starting_step-1}-->{starting_step} , loss_min: {loss_min}", "info")
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Resuming from step: {starting_step-1}-->{starting_step} , loss_min (eval val): {loss_min}", "info")
 
 
 # ----------------------------------------------------------------------- #
@@ -915,7 +915,7 @@ try:
     # Training completed
     if dist_rank == 0:
         logger.info(f"[TRAINING] Training completed after {step_counter} steps")
-        logger.info(f"[TRAINING] Final loss_min: {loss_min}")
+        logger.info(f"[TRAINING] Final loss_min (eval val): {loss_min}")
 
 except KeyboardInterrupt:
     logger_utils.log_on_all_ranks(logger, "Training was interrupted!", "error")
