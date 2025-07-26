@@ -691,6 +691,10 @@ try:
     if dist_rank == 0:
         logger.info(f"[TRAINING VERIFICATION] Starting step-based training loop from step {starting_step}")
 
+    # [PERFORMANCE] Start memory monitoring
+    if dist_local_rank == 0:
+        memmax.start()
+
     # Step-based training loop
     for batch_data in infinite_dataloader:
         if step_counter >= total_steps:
@@ -760,6 +764,10 @@ try:
 
             # Increment step counter only after parameter update
             step_counter += 1
+
+            # [PERFORMANCE] Update memory monitoring
+            if dist_local_rank == 0:
+                memmax.update()
 
             # Log step counter increment for verification
             if dist_rank == 0:
@@ -941,6 +949,10 @@ except Exception as e:
     tb = traceback.format_exc()
     logger_utils.log_on_all_ranks(logger, f"Error occurred: {e}\nTraceback: {tb}", "error")
 finally:
+    # [PERFORMANCE] Stop memory monitoring
+    if dist_local_rank == 0 and memmax is not None:
+        memmax.stop()
+
     # Clean up hooks
     if monitors_dynamics and act_monitor is not None:
         act_monitor.remove_hooks()
