@@ -19,9 +19,9 @@ from omegaconf  import OmegaConf
 
 # -- peaknet specific imports
 # --- Dataset
-from peaknet.datasets.segmented_zarr_dataset import (
-    SegmentedPeakNetDatasetConfig,
-    SegmentedPeakNetDataset,
+from peaknet.datasets.data import (
+    PeakNetDatasetConfig,
+    PeakNetDataset,
 )
 from peaknet.tensor_transforms import (
     Pad,
@@ -57,7 +57,12 @@ from peaknet.utils.fsdp        import (
 )
 import logging
 import peaknet.utils.logger as logger_utils
-from peaknet.utils.data        import wrap_with_torch_dataloader
+from peaknet.utils.data        import wrap_with_torch_dataloader, create_infinite_dataloader
+from peaknet.utils.timestamp   import (
+    extract_timestamp_from_checkpoint,
+    parse_step_from_checkpoint,
+    broadcast_timestamp_to_all_ranks,
+)
 from peaknet.lr_scheduler      import CosineLRScheduler
 from peaknet.perf              import Timer
 from peaknet.utils.monitor import (
@@ -69,7 +74,7 @@ from peaknet.utils.flops import (
     estimate_mfu_per_iteration,
 )
 from peaknet.utils.signal import register_handlers
-from peaknet.utils.eval import estimate_loss, is_last_batch
+from peaknet.utils.eval import estimate_loss
 
 # -- Imports for monitoring training dynamics
 # Note: Removed transformers.activations import as not needed for Hiera
@@ -140,6 +145,8 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------- #
 parser = argparse.ArgumentParser(description = "Load training configuration from a YAML file to a dictionary.")
 parser.add_argument("yaml_file", help="Path to the YAML file")
+parser.add_argument("--resume_from_checkpoint", type=str, default=None, 
+                   help="Path to checkpoint folder to resume from")
 args = parser.parse_args()
 
 # ----------------------------------------------------------------------- #
@@ -150,15 +157,15 @@ fl_yaml = args.yaml_file
 config = OmegaConf.load(fl_yaml)
 
 # -- Checkpoint
-dir_root_chkpt                  = config.checkpoint.directory
-fl_chkpt_prefix                 = config.checkpoint.prefix
-path_chkpt_prev                 = config.checkpoint.get("path_chkpt_prev", None)
-chkpt_saving_iterations         = config.checkpoint.chkpt_saving_iterations
-preempt_metadata_path           = config.checkpoint.get("preempt_metadata_path", os.environ.get('PREEMPT_METADATA_PATH', None))
-preempt_chkpt_saving_iterations = config.checkpoint.preempt_chkpt_saving_iterations
-state_dict_type                 = config.checkpoint.state_dict_type
-chkpt_offload_to_cpu            = config.checkpoint.offload_to_cpu
-chkpt_rank0_only                = config.checkpoint.rank0_only
+dir_root_chkpt                = config.checkpoint.directory
+fl_chkpt_prefix               = config.checkpoint.prefix
+path_chkpt_prev               = config.checkpoint.get("path_chkpt_prev", None)
+chkpt_saving_steps            = config.checkpoint.chkpt_saving_steps
+preempt_metadata_path         = config.checkpoint.get("preempt_metadata_path", os.environ.get('PREEMPT_METADATA_PATH', None))
+preempt_chkpt_saving_steps    = config.checkpoint.preempt_chkpt_saving_steps
+state_dict_type               = config.checkpoint.state_dict_type
+chkpt_offload_to_cpu          = config.checkpoint.offload_to_cpu
+chkpt_rank0_only              = config.checkpoint.rank0_only
 
 # -- Dataset
 path_dataset_train     = config.dataset.path_train
@@ -172,27 +179,15 @@ pin_memory             = config.dataset.pin_memory
 prefetch_factor        = config.dataset.prefetch_factor
 debug_dataloading      = config.dataset.debug
 cache_size             = config.dataset.cache_size
-num_patch              = config.dataset.transforms.num_patch
-size_patch             = config.dataset.transforms.size_patch
-frac_shift_max         = config.dataset.transforms.frac_shift_max
-angle_max              = config.dataset.transforms.angle_max
-var_size_patch         = config.dataset.transforms.var_size_patch
-patch_size             = config.dataset.transforms.patch_size
-stride                 = config.dataset.transforms.stride
-detector_norm_params   = config.dataset.transforms.norm
-sampling_fraction      = config.dataset.transforms.get("sampling_fraction", None)
-H_pad                  = config.dataset.transforms.H_pad
-W_pad                  = config.dataset.transforms.W_pad
-Hv                     = config.dataset.transforms.Hv
-Wv                     = config.dataset.transforms.Wv
-sigma                  = config.dataset.transforms.sigma
-num_crop               = config.dataset.transforms.num_crop
-uses_pad               = config.dataset.transforms.set.pad
-uses_random_patch      = config.dataset.transforms.set.random_patch
-uses_random_rotate     = config.dataset.transforms.set.random_rotate
-uses_random_shift      = config.dataset.transforms.set.random_shift
+# Transform parameters (keep existing)
+H_pad = config.dataset.transforms.H_pad
+W_pad = config.dataset.transforms.W_pad
+Hv = config.dataset.transforms.Hv
+Wv = config.dataset.transforms.Wv
+sigma = config.dataset.transforms.sigma
+num_crop = config.dataset.transforms.num_crop
+uses_pad = config.dataset.transforms.set.pad
 uses_polar_center_crop = config.dataset.transforms.set.polar_center_crop
-uses_batch_sampler     = config.dataset.transforms.set.batch_sampler
 
 # -- Model
 from_scratch        = config.model.from_scratch
@@ -242,11 +237,10 @@ adam_fused   = float(config.optim.fused)
 grad_clip    = float(config.optim.grad_clip)
 
 # -- Scheduler
-patience                    = config.lr_scheduler.patience
-warmup_iterations           = config.lr_scheduler.warmup_iterations
-total_iterations            = config.lr_scheduler.total_iterations
-min_lr                      = float(config.lr_scheduler.min_lr)
-scheduler_update_iterations = config.lr_scheduler.scheduler_update_iterations
+warmup_steps = config.lr_scheduler.warmup_steps
+total_steps = config.lr_scheduler.total_steps
+min_lr = float(config.lr_scheduler.min_lr)
+scheduler_update_steps = config.lr_scheduler.scheduler_update_steps
 
 # -- Distributed envs
 dist_backend           = config.dist.backend
@@ -260,7 +254,6 @@ fl_log_prefix  = config.logging.prefix
 log_level      = config.logging.level
 
 # -- Misc
-max_epochs         = config.misc.max_epochs
 max_eval_iter      = config.misc.max_eval_iter
 max_eval_retry     = config.misc.max_eval_retry
 compiles_model     = config.misc.compiles_model
@@ -270,12 +263,12 @@ peak_flops_per_sec = config.misc.peak_flops_per_sec
 monitors_dynamics  = config.misc.monitors_dynamics
 sharding_stage     = config.misc.sharding_stage
 
+
 # ----------------------------------------------------------------------- #
 #  MISC FEATURES
 # ----------------------------------------------------------------------- #
 # Register signal handlers for graceful shutdown
 register_handlers()
-
 
 # ----------------------------------------------------------------------- #
 #  DIST SETUP
@@ -292,7 +285,6 @@ memmax = MemoryMaximizer() if dist_local_rank == 0 else None
 
 # --- Seed setup
 seed_offset = dist_rank if uses_unique_world_seed else 0
-
 
 # ----------------------------------------------------------------------- #
 #  FSDP SETUP
@@ -350,70 +342,97 @@ class NoTransform:
 merges_batch_patch_dims = uses_polar_center_crop
 pre_transforms = (
     Pad(H_pad, W_pad) if uses_pad else NoTransform(),
-)
-
-transforms = (
     PolarCenterCrop(
-        Hv       = Hv,
-        Wv       = Wv,
-        sigma    = sigma,
-        num_crop = num_crop,
+        Hv=Hv,
+        Wv=Wv,
+        sigma=sigma,
+        num_crop=num_crop,
     ) if uses_polar_center_crop else NoTransform(),
     MergeBatchPatchDims() if merges_batch_patch_dims else NoTransform(),
-    BatchSampler(sampling_fraction) if uses_batch_sampler else NoTransform(),
-    RandomPatch(
-        num_patch    = num_patch,
-        H_patch      = size_patch,
-        W_patch      = size_patch,
-        var_H_patch  = var_size_patch,
-        var_W_patch  = var_size_patch,
-        returns_mask = False,
-    ) if uses_random_patch  else NoTransform(),
-    RandomRotate(angle_max) if uses_random_rotate else NoTransform(),
-    RandomShift(
-        frac_y_shift_max = frac_shift_max,
-        frac_x_shift_max = frac_shift_max,
-    ) if uses_random_shift  else NoTransform(),
 )
+transforms = None
 
 # -- Set up training set
-dataset_train_config = SegmentedPeakNetDatasetConfig(
-    path_csv        = path_dataset_train,
-    seg_size        = seg_size,
-    transforms      = pre_transforms,
-    buffer_size     = 1,
-    dist_rank       = dist_rank,
-    dist_world_size = dist_world_size,
-    device          = device,
-    dtype           = None,
-    perfs_runtime   = False,
+dataset_train_config = PeakNetDatasetConfig(
+    path_csv=path_dataset_train,
+    transforms=pre_transforms,
+    buffer_size=cache_size,
+    dist_rank=dist_rank,
+    dist_world_size=dist_world_size,
+    device=str(device),
+    dtype=None,
+    uses_norm=True,
+    scales_variance=True,
+    perfs_runtime=False,
 )
-dataset_train = SegmentedPeakNetDataset(dataset_train_config)
+dataset_train = PeakNetDataset(dataset_train_config)
 
 # -- Set up eval set
 # --- For training loss
-dataset_eval_train = SegmentedPeakNetDataset(dataset_train_config)
+dataset_eval_train = PeakNetDataset(dataset_train_config)
 
 # --- For val loss
-dataset_eval_val_config = SegmentedPeakNetDatasetConfig(
-    path_csv        = path_dataset_eval,
-    seg_size        = seg_size,
-    transforms      = pre_transforms,
-    buffer_size     = 1,
-    dist_rank       = dist_rank,
-    dist_world_size = dist_world_size,
-    device          = device,
-    dtype           = None,
-    perfs_runtime   = False,
+dataset_eval_val_config = PeakNetDatasetConfig(
+    path_csv=path_dataset_eval,
+    transforms=pre_transforms,
+    buffer_size=cache_size,
+    dist_rank=dist_rank,
+    dist_world_size=dist_world_size,
+    device=str(device),
+    dtype=None,
+    uses_norm=True,
+    scales_variance=True,
+    perfs_runtime=False,
 )
-dataset_eval_val = SegmentedPeakNetDataset(dataset_eval_val_config)
+dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
 
 # -- Custom collate to merge patch and batch dimension using concatenation
-## custom_collate = lambda batch: torch.cat(batch, dim = 0)  # batch of [N, C, H, W] -> [B * N, C, H, W]
-## def custom_collate(batch):
-##     batch_filtered = [x for x in batch if x is not None]
-##     return torch.cat(batch_filtered, dim = 0) if len(batch_filtered) else None
 custom_collate = None
+
+# ----------------------------------------------------------------------- #
+#  TIMESTAMP GENERATION AND RESUMPTION
+# ----------------------------------------------------------------------- #
+starting_step = 0
+loss_min = float('inf')
+run_timestamp = None
+
+# Determine if we're resuming and extract timestamp + step
+if args.resume_from_checkpoint:
+    # Explicit resumption from any checkpoint type
+    starting_step = parse_step_from_checkpoint(args.resume_from_checkpoint) + 1
+    run_timestamp = extract_timestamp_from_checkpoint(args.resume_from_checkpoint)
+    if not run_timestamp:
+        # Fallback to current time if timestamp can't be parsed
+        run_timestamp = time.strftime("%Y_%m%d_%H%M")
+        if dist_rank == 0:
+            logger.warning(f"Could not extract timestamp from {args.resume_from_checkpoint}, using current time")
+elif preempt_metadata_path and os.path.exists(preempt_metadata_path):
+    # Auto-resume from latest preemptive checkpoint
+    try:
+        with open(preempt_metadata_path, 'r') as f:
+            preempt_checkpoint_path = f.read().strip()
+        if os.path.exists(preempt_checkpoint_path):
+            args.resume_from_checkpoint = preempt_checkpoint_path  # Set for later use
+            starting_step = parse_step_from_checkpoint(preempt_checkpoint_path) + 1
+            run_timestamp = extract_timestamp_from_checkpoint(preempt_checkpoint_path)
+            if dist_rank == 0:
+                logger.info(f"Auto-resuming from preemptive checkpoint: {preempt_checkpoint_path}")
+    except Exception as e:
+        if dist_rank == 0:
+            logger.warning(f"Failed to read preemptive metadata from {preempt_metadata_path}: {e}")
+
+# Generate new timestamp if this is a fresh run
+if run_timestamp is None:
+    if dist_rank == 0:
+        run_timestamp = time.strftime("%Y_%m%d_%H%M")
+    else:
+        run_timestamp = None
+    # Broadcast timestamp to all ranks for consistency
+    run_timestamp = broadcast_timestamp_to_all_ranks(run_timestamp, dist_rank, uses_dist)
+
+if dist_rank == 0:
+    logger.info(f"Run timestamp: {run_timestamp}")
+    logger.info(f"Starting from step: {starting_step}")
 
 # ----------------------------------------------------------------------- #
 #  CHECKPOINT PRE FSDP
@@ -426,13 +445,13 @@ checkpointer = init_checkpointer(
     offload_to_cpu=chkpt_offload_to_cpu,
     rank0_only=chkpt_rank0_only
 )
-from_resume = path_chkpt_prev is not None
+from_resume = args.resume_from_checkpoint is not None
 
 # ----------------------------------------------------------------------- #
 #  MODEL
 # ----------------------------------------------------------------------- #
-logger.debug('Configuring model...')
 # -- Config the model with explicit parameters
+logger.debug('Configuring model...')
 model = HieraSegmentation(
     # Segmentation-specific parameters
     num_classes=num_classes,
@@ -466,7 +485,7 @@ model = HieraSegmentation(
 # Initialize weights (HieraSegmentation handles this in its constructor)
 if hasattr(model, 'init_weights') and callable(model.init_weights):
     model.init_weights()
-if not uses_dist: model.to(device)
+## if not uses_dist: model.to(device)
 
 # !! Make all params trainable, a workaround for pytorch 2.0.1
 torch_version = torch.__version__
@@ -481,7 +500,7 @@ if dist_rank == 0:
 
 if from_resume:
     if hasattr(checkpointer, 'pre_dp_load'):
-        checkpointer.pre_dp_load(dist_rank, model, path_chkpt_prev)
+        checkpointer.pre_dp_load(dist_rank, model, args.resume_from_checkpoint)
 
 # -- Mixed precision
 mixed_precision_dtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dist_dtype]
@@ -574,10 +593,10 @@ optim_arg_dict = dict(
 if 'fused' in inspect.signature(optim.AdamW).parameters:
     optim_arg_dict['fused'] = adam_fused
 optimizer = optim.AdamW(param_iter, **optim_arg_dict)
-scheduler = CosineLRScheduler(optimizer         = optimizer,
-                              warmup_iterations = warmup_iterations,
-                              total_iterations  = total_iterations,
-                              min_lr            = min_lr)
+scheduler = CosineLRScheduler(optimizer = optimizer,
+                              warmup_iterations = warmup_steps,
+                              total_iterations  = total_steps,
+                              min_lr = min_lr)
 
 
 # ----------------------------------------------------------------------- #
@@ -585,31 +604,25 @@ scheduler = CosineLRScheduler(optimizer         = optimizer,
 # ----------------------------------------------------------------------- #
 print(f'[RANK {dist_rank}] Confguring model, optim, scheduler, training state checkpoint...')
 # -- Set init training state dict
-loss_min = float('inf')
-iter_state = dict(
-    epoch     = 0,
-    seg       = 0,
-    start_idx = dataset_train.start_idx,
-    end_idx   = dataset_train.end_idx,
-    loss_min  = loss_min,
+step_state = dict(
+    step        = starting_step,
+    loss_min    = loss_min,
+    timestamp   = run_timestamp,
 )
 
 # -- Optional resumption
-last_epoch = 0
-last_seg   = -1
 if from_resume:
     if hasattr(checkpointer, 'post_dp_load'):
         # Optimizer, scheduler are loaded
-        checkpointer.post_dp_load(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt_prev)
+        checkpointer.post_dp_load(dist_rank, model, optimizer, scheduler, step_state, args.resume_from_checkpoint)
 
         # Training state
-        last_epoch = iter_state.get("epoch")
-        last_seg   = iter_state.get("seg")
-        loss_min   = iter_state.get("loss_min")
+        loss_min = step_state.get("loss_min", loss_min)
 
         # Log checkpoint loading with smart utility for visibility
-        logger_utils.log_on_all_ranks(logger, f"Loading from checkpoint -- {path_chkpt_prev}.", "info")
-        logger_utils.log_on_all_ranks(logger, f"PREV - last_epoch {last_epoch}, last_seg {iter_state.get('start_idx')}-{iter_state.get('end_idx')}, loss_min = {loss_min}", "info")
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION VERIFICATION] Loading from checkpoint -- {args.resume_from_checkpoint}", "info")
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION VERIFICATION] Parsed starting_step: {starting_step}, loss_min: {loss_min}", "info")
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION VERIFICATION] Extracted timestamp: {run_timestamp}", "info")
 
 
 # ----------------------------------------------------------------------- #
@@ -641,444 +654,302 @@ num_flops_per_token = estimate_flops_per_token(model, dummy_shape, hiera_patch_s
 #  TRAINING LOOP
 # ----------------------------------------------------------------------- #
 batch_input_shape = None
-logger.debug('Ready for training loop...')
-iteration_counter = 0  # One iteration is one param update after one or a few forward/backward pass
+logger.debug('Ready for step-based training loop...')
+
+# Initialize step counter from resumption
+step_counter = starting_step
+
+# Create infinite cycling dataloader
+infinite_dataloader, sampler, batches_per_epoch = create_infinite_dataloader(
+    dataset=dataset_train,
+    base_seed=base_seed,
+    drop_last_in_sampler=drop_last_in_sampler,
+    drop_last_in_loader=drop_last_in_loader,
+    uses_dist=uses_dist,
+    batch_size=batch_size,
+    num_workers=num_workers,
+    pin_memory=pin_memory,
+    prefetch_factor=prefetch_factor,
+)
+
+if dist_rank == 0:
+    logger.info(f"Training for {total_steps} total steps (starting from step {starting_step})")
+    logger.info(f"[TRAINING VERIFICATION] Run timestamp: {run_timestamp}")
+    logger.info(f"[TRAINING VERIFICATION] Checkpoint saving every {chkpt_saving_steps} steps")
+    logger.info(f"[TRAINING VERIFICATION] Scheduler update every {scheduler_update_steps} steps")
+    logger.info(f"[TRAINING VERIFICATION] Gradient accumulation steps: {grad_accum_steps}")
+    logger.info(f"[TRAINING VERIFICATION] Batches per epoch: {batches_per_epoch}")
+
 try:
-    # -- Loop over epochs
-    # Only increment starting epoch if current epoch was fully completed
-    for epoch in tqdm.tqdm(range(max_epochs), desc = f'[RANK {dist_rank}] Epoch'):
-        # Skip epochs up to, but not including the last_epoch
-        if epoch < last_epoch: continue
+    model.train()
 
-        # Reset dataset in a new epoch???
-        if not from_resume:
-            dataset_train.reset()
+    # Initialize gradient accumulation state
+    grad_nosync_counter = 0
+    batch_idx = 0
 
-        # Otherwise, update the dataset index according to the training state
-        else:
-            # Update the dataset status
-            dataset_train.start_idx = iter_state.get("start_idx")
-            dataset_train.end_idx   = iter_state.get("end_idx")
+    if dist_rank == 0:
+        logger.info(f"[TRAINING VERIFICATION] Starting step-based training loop from step {starting_step}")
 
-        # -- Loop over dataset segments
-        for seg in tqdm.tqdm(range(dataset_train.num_seg), desc = f'[RANK {dist_rank}] Segment'):
-            # Skip previous segments up to and including the last_seg
-            if epoch == last_epoch and seg <= last_seg:
-                continue
+    # Step-based training loop
+    for batch_data in infinite_dataloader:
+        if step_counter >= total_steps:
+            break
 
-            # Switch to training state
-            model.train()
+        if batch_data is None:
+            continue
 
-            # Prepare training on one segment (iteration)
-            # Set next segment or break the loop when having no next segment
-            requires_reset = dataset_train.set_start_idx(dataset_train.end_idx)
-            if requires_reset:
-                break
+        # Process batch data
+        batch_data = torch.cat(batch_data, dim=0)  # (2*B, C, H, W)
+        batch_data = batch_data.to(device, non_blocking=True, dtype=mixed_precision_dtype)
 
-            # [PERFORMANCE]
-            if dist_local_rank == 0:
-                memmax.start()
+        # Apply transforms
+        if transforms is not None:
+            for trans in transforms:
+                batch_data = trans(batch_data)
 
+        # Split input and target
+        current_batch_size = batch_data.size(0) // 2
+        batch_input = batch_data[:current_batch_size]
+        batch_target = batch_data[current_batch_size:]
+
+        # Binarize labels
+        if transforms is not None:
+            batch_target = batch_target > 0.5
+
+        # Determine if gradient sync is required for this batch
+        # Detect last batch of current epoch cycle (same logic as train.fsdp.py)
+        is_last_batch_of_epoch = (batch_idx % batches_per_epoch) == (batches_per_epoch - 1)
+        is_grad_sync_required = is_last_batch_of_epoch or is_action_due(grad_nosync_counter, grad_accum_steps)
+
+        # Forward and backward pass with proper gradient accumulation
+        with grad_sync_context(is_grad_sync_required):
+            with autocast_context:
+                batch_output = model(batch_input)
+                loss = criterion(batch_output, batch_target)
+                loss = loss.mean()
+                loss = loss / grad_accum_steps  # Scale for gradient accumulation
+
+            # Backward pass
+            scaler.scale(loss).backward()
+
+        # Increment gradient accumulation counter and batch index
+        grad_nosync_counter += 1
+        batch_idx += 1
+
+        # Only update parameters when gradient sync is required
+        if is_grad_sync_required:
+            # Log gradient sync event for verification
             if dist_rank == 0:
-                logger.info(f"Working on segment: {dataset_train.start_idx}:{dataset_train.end_idx}")
+                sync_reason = "epoch_boundary" if is_last_batch_of_epoch else "grad_accum_complete"
+                logger.debug(f"[GRADIENT SYNC] Triggered by {sync_reason} at batch_idx={batch_idx}, grad_nosync_counter={grad_nosync_counter}")
 
-            # Create training dataloader using utility function
-            dataloader, sampler = wrap_with_torch_dataloader(
-                dataset=dataset_train,
-                base_seed=base_seed,
-                drop_last_in_sampler=drop_last_in_sampler,
-                drop_last_in_loader=drop_last_in_loader,
-                uses_dist=uses_dist,
-                batch_size=batch_size,
-                num_workers=num_workers,
-                custom_collate=custom_collate,
-                pin_memory=pin_memory,
-                prefetch_factor=prefetch_factor,
-                epoch=epoch,
-                is_eval=False,
-            )
+            # Gradient clipping and optimizer step
+            if grad_clip > 0.0:
+                scaler.unscale_(optimizer)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip) \
+                            if (not uses_dist) or sharding_strategy == ShardingStrategy.NO_SHARD \
+                            else \
+                            model.clip_grad_norm_(grad_clip)
 
-            # Set epoch for distributed sampler (handled by utility)
-            if uses_dist and sampler is not None:
-                sampler.set_epoch(epoch)
+            # Update parameters
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
 
-            # -- Loop over mini batches
-            # --- Set up helper variables for gradient accum and reporting
-            # Set up gradient accumulation helper variables
-            grad_nosync_counter         = 0
-            num_batches                 = len(dataloader)
-            num_remainder_batches       = num_batches % grad_accum_steps
-            start_idx_remainder_batches = num_batches - num_remainder_batches  # e.g. total=102, steps=5, idx = 102 - 102%5 = 100
+            # Reset gradient accumulation counter and batch index
+            grad_nosync_counter = 0
 
-            # Aggregate the loss and number of processed tokens during each gradient accumulation
-            total_loss       = torch.tensor(0.0, device = device)
-            total_num_tokens = torch.tensor(0.0, device = device)
+            # Increment step counter only after parameter update
+            step_counter += 1
 
-            # Set a timer flag
-            starts_timer = True
+            # Log step counter increment for verification
+            if dist_rank == 0:
+                logger.info(f"[STEP VERIFICATION] Step counter incremented to {step_counter} after parameter update")
+                logger.info(f"[LOSS PRECISION] Step {step_counter}: loss={loss:.10f} (high precision for continuity testing)")
 
-            # --- Mini batch loop
-            logger.debug(f"Start processing {len(dataloader)} batches at epoch {epoch}, seg {seg}.")
-            for batch_idx, batch_data in tqdm.tqdm(
-                enumerate(dataloader),
-                total = num_batches,
-                desc  = f'[RANK {dist_rank}] Mini batch',
-            ):
-                # Start timer???
-                if starts_timer:
-                    t_start = time.monotonic()
-                    starts_timer = False
+            # Update scheduler
+            if is_action_due(step_counter, scheduler_update_steps):
+                if dist_rank == 0:
+                    logger.info(f"[SCHEDULER VERIFICATION] Scheduler update triggered at step {step_counter}")
+                scheduler.step()
+                if dist_rank == 0:
+                    current_lrs = scheduler.get_lr()
+                    current_lrs_msg = ",".join(f"{lr}" for lr in current_lrs)
+                    logger.info(f"[SCHEDULER VERIFICATION] lr updated to {current_lrs_msg} at step {step_counter}")
 
-                # ---- Forward/Backward during an iteration
-                # Create dummy data for a None batch
-                # FIXME: Better data cleaning will eliminate None batch
-                if batch_data is None:
-                    logger.debug(f"Found None batch at batch idx {batch_idx}.  Creating a dummy input!!!")
-                    batch_input  = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
-                    batch_target = torch.zeros(batch_input_shape, dtype = mixed_precision_dtype)
-                    batch_data = (batch_input, batch_target)
+            # Logging (only on main process)
+            if dist_rank == 0 and step_counter % 10 == 0:
+                current_lrs = scheduler.get_lr()
+                logger.info(f"Step {step_counter}: loss={loss:.6f}, lr={current_lrs[0]:.2e}")
 
-                # Concat data to perform the identical transform on input and target
-                batch_data = torch.cat(batch_data, dim = 0)    # (2*B, C, H, W)
-                batch_data = batch_data.to(device, non_blocking = True, dtype = mixed_precision_dtype)
+            # Enhanced logging for stress testing (every step near checkpoints)
+            if step_counter % chkpt_saving_steps == 0 or step_counter % chkpt_saving_steps == 1:
+                if dist_rank == 0:
+                    current_lrs = scheduler.get_lr()
+                    logger.info(f"[STRESS TEST] Step {step_counter}: loss={loss:.8f}, lr={current_lrs[0]:.2e} (checkpoint boundary)")
 
-                # Optional transform
-                if transforms is not None:
-                    for enum_idx, trans in enumerate(transforms):
-                        batch_data = trans(batch_data)
+            # Checkpointing
+            if is_action_due(step_counter, chkpt_saving_steps):
+                if dist_rank == 0:
+                    logger.info(f"[CHECKPOINT VERIFICATION] Checkpoint triggered at step {step_counter}")
+                    logger.info(f"[CHECKPOINT VERIFICATION] Expected checkpoint name: {fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}")
 
-                # Unpack vars
-                current_batch_size = batch_data.size(0) // 2
-                batch_input  = batch_data[                  :current_batch_size]
-                batch_target = batch_data[current_batch_size:                  ]
+                # Evaluation
+                model.eval()
 
-                # Optionally binarize the label
-                if transforms is not None:
-                    batch_target = batch_target > 0.5
+                with torch.no_grad():
+                    # Training set
+                    eval_dataloader_train, sampler_eval = wrap_with_torch_dataloader(
+                        dataset=dataset_eval_train,
+                        base_seed=base_seed,
+                        drop_last_in_sampler=drop_last_in_sampler,
+                        drop_last_in_loader=drop_last_in_loader,
+                        uses_dist=uses_dist,
+                        batch_size=batch_size,
+                        num_workers=num_workers,
+                        custom_collate=custom_collate,
+                        pin_memory=pin_memory,
+                        prefetch_factor=prefetch_factor,
+                        epoch=0,  # Fixed epoch for eval
+                        is_eval=True,
+                    )
 
-                # Specify the effective grad accum steps
-                real_grad_accum_steps = grad_accum_steps if batch_idx < start_idx_remainder_batches else num_remainder_batches
+                    if uses_dist and sampler_eval is not None:
+                        sampler_eval.set_epoch(0)
 
-                # Conditionally turn off grad sync for grad accumulation to simulate a larger batch unless the sync is due or the last batch
-                # Refer to https://github.com/pytorch/pytorch/blob/6c4f43f82675b5fcfe8cf3e5983d0c0f326408aa/test/distributed/fsdp/test_fsdp_grad_acc.py#L180
-                is_grad_sync_required = is_last_batch(batch_idx, len(dataloader)) or is_action_due(grad_nosync_counter, grad_accum_steps)
-                with grad_sync_context(is_grad_sync_required):
-                    # Forward
-                    with autocast_context:
-                        batch_output = model(batch_input)
-                        loss = criterion(batch_output, batch_target)
-                        loss = loss.mean()
-                        loss = loss / real_grad_accum_steps  # scale the loss to account for gradient accumulation
-                        logger.debug(f"loss = {loss}")
+                    train_eval_loss = estimate_loss(
+                        eval_dataloader_train,
+                        model,
+                        criterion,
+                        autocast_context,
+                        max_iter=max_eval_iter,
+                        desc='(training set)',
+                        device=device,
+                        dummy_input_shape=batch_input_shape,
+                        mixed_precision_dtype=mixed_precision_dtype,
+                        transforms=transforms,
+                        uses_dist=uses_dist,
+                        dist_rank=dist_rank,
+                        dist_world_size=dist_world_size,
+                        data_dump_on=data_dump_on,
+                    )
 
-                    # Accumulate loss
-                    total_loss += loss.detach()
+                    # Validation set
+                    eval_dataloader_val, sampler_eval = wrap_with_torch_dataloader(
+                        dataset=dataset_eval_val,
+                        base_seed=base_seed,
+                        drop_last_in_sampler=drop_last_in_sampler,
+                        drop_last_in_loader=drop_last_in_loader,
+                        uses_dist=uses_dist,
+                        batch_size=batch_size,
+                        num_workers=num_workers,
+                        custom_collate=custom_collate,
+                        pin_memory=pin_memory,
+                        prefetch_factor=prefetch_factor,
+                        epoch=0,  # Fixed epoch for eval
+                        is_eval=True,
+                    )
 
-                    # Accumulate number of tokens processed
-                    total_numel = batch_input.numel()  # Get number of numeric elements
-                    token_size  = hiera_patch_size**2  # Use the hiera patch size we calculated above
-                    num_tokens  = total_numel / token_size
-                    total_num_tokens += num_tokens
+                    if uses_dist and sampler_eval is not None:
+                        sampler_eval.set_epoch(0)
 
-                    # Backward
-                    scaler.scale(loss).backward()
+                    val_eval_loss = estimate_loss(
+                        eval_dataloader_val,
+                        model,
+                        criterion,
+                        autocast_context,
+                        max_iter=max_eval_iter,
+                        desc='(validation set)',
+                        device=device,
+                        dummy_input_shape=batch_input_shape,
+                        mixed_precision_dtype=mixed_precision_dtype,
+                        transforms=transforms,
+                        uses_dist=uses_dist,
+                        dist_rank=dist_rank,
+                        dist_world_size=dist_world_size,
+                        data_dump_on=data_dump_on,
+                    )
 
-                # Increment the grad nosync counter
-                grad_nosync_counter += 1
+                # Process evaluation results
+                # Use validation loss for model selection if available, otherwise use training loss
+                if not torch.isnan(val_eval_loss) and not torch.isinf(val_eval_loss):
+                    eval_loss = val_eval_loss
+                else:
+                    eval_loss = train_eval_loss if not torch.isnan(train_eval_loss) and not torch.isinf(train_eval_loss) else float('inf')
 
-                # Conditional parameter updates when grad sync is required
-                if is_grad_sync_required:
-                    # ---- Update neural network parameters
-                    # Grad clipping
-                    if grad_clip != 0.0:
-                        scaler.unscale_(optimizer)
-                        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip) \
-                                    if (not uses_dist) or sharding_strategy == ShardingStrategy.NO_SHARD \
-                                    else \
-                                    model.clip_grad_norm_(grad_clip)
+                if dist_rank == 0:
+                    # Log both losses if both are valid
+                    if (not torch.isnan(train_eval_loss) and not torch.isinf(train_eval_loss) and 
+                        not torch.isnan(val_eval_loss) and not torch.isinf(val_eval_loss)):
+                        logger.info(f"Step {step_counter}: train_eval_loss={train_eval_loss:.6f}, val_eval_loss={val_eval_loss:.6f}")
+                    elif not torch.isnan(train_eval_loss) and not torch.isinf(train_eval_loss):
+                        logger.info(f"Step {step_counter}: train_eval_loss={train_eval_loss:.6f}")
+                    elif not torch.isnan(val_eval_loss) and not torch.isinf(val_eval_loss):
+                        logger.info(f"Step {step_counter}: val_eval_loss={val_eval_loss:.6f}")
 
-                    # Update parameters
-                    scaler.step(optimizer)
-                    scaler.update()
+                # Save best model checkpoint if evaluation loss improved
+                if eval_loss < loss_min and eval_loss != float('inf'):
+                    loss_min = eval_loss
 
-                    # ---- Report the current iteration
-                    # Increment the iteration counter after param update
-                    iteration_counter += 1
+                    # Update step state
+                    step_state["step"] = step_counter
+                    step_state["loss_min"] = loss_min
+                    step_state["timestamp"] = run_timestamp
 
-                    # Obtain the mean total loss
-                    if uses_dist:
-                        dist.all_reduce(total_loss, op = dist.ReduceOp.AVG)  # Avg across ranks
+                    best_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_best_step_{step_counter}"
+                    best_output_path = os.path.join(dir_root_chkpt, best_output_dir)
 
-                    # Obtain the total number of tokens processed
-                    if uses_dist:
-                        dist.all_reduce(total_num_tokens, op = dist.ReduceOp.SUM)  # Sum across ranks
-
-                    # Wait for all gpus to complete work
-                    if device_type == "cuda":
-                        torch.cuda.synchronize()
-
-                    # Stop timer
-                    t_end = time.monotonic()
-
-                    # Calculate tokens per second
-                    t_delta = t_end - t_start
-                    tokens_per_sec = total_num_tokens / t_delta
-
-                    # Log the training loop loss after a forward/backward/update
                     if dist_rank == 0:
-                        # MFU
-                        mfu_per_iteration = estimate_mfu_per_iteration(num_flops_per_token, total_num_tokens, t_delta, peak_flops_per_sec)
+                        logger.info(f"[CHECKPOINT VERIFICATION] Saving BEST checkpoint: {best_output_dir}")
 
-                        # Misc
-                        current_lrs   = scheduler.get_lr()
-                        seg_start_idx = dataset_train.start_idx
-                        seg_end_idx   = dataset_train.end_idx
+                    checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, best_output_path)
 
-                        # Log
-                        log_data = {
-                            "rank"               : dist_rank,
-                            "logevent"           : "LOSS:TRAIN",
-                            "iteration"          : iteration_counter,
-                            "segment"            : f"{seg_start_idx}-{seg_end_idx}",
-                            "learning_rate"      : ",".join(f"{lr}" for lr in current_lrs),
-                            "grad_norm"          : f"{grad_norm:.6f}",
-                            "mean_train_loss"    : f"{total_loss:.6f}",
-                            "tokens_per_sec"     : f"{tokens_per_sec:.1e}",
-                            "mfu_per_iteration"  : f"{mfu_per_iteration:.3f}",
-                            "grad_nosync_counter": grad_nosync_counter,
-                        }
-                        log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
-                        logger.info(log_msg)
+                    if dist_rank == 0:
+                        logger.info(f"[CHECKPOINT VERIFICATION] BEST checkpoint saved successfully: {best_output_dir} (val_loss={eval_loss:.6f})")
 
-                    # ---- Monitor training dynamics
-                    # Do it before zero-ing gradients
-                    if monitors_dynamics and act_monitor is not None:
-                        # Monitor preactivation and activation of the nonlinearity
-                        for name, act in act_monitor.activations.items():
-                            mean_preact, std_preact = act.get('pre')
-                            mean_act, std_act       = act.get('pos')
-                            log_data = {
-                                "rank"        : dist_rank,
-                                "iteration"   : iteration_counter,
-                                "logevent"    : "DYNAMICS:ACT",
-                                "name"        : name,
-                                "preact.mean" : mean_preact,
-                                "preact.std"  : std_preact,
-                                "act.mean"    : mean_act,
-                                "act.std"     : std_act,
-                            }
-                            log_msg = " | ".join([f"{k}={v}" for k, v in log_data.items()])
-                            logger.info(log_msg)
+                # Regular checkpoint with unified naming
+                step_state["step"] = step_counter
+                step_state["loss_min"] = loss_min
+                step_state["timestamp"] = run_timestamp
 
-                        # Monitor param update - disabled for Hiera (different structure)
-                        # current_lr = scheduler.get_lr()[0]  # It's a list
-                        # backbone_param_monitor = monitor_param_update_metrics(model.backbone, current_lr)  # Motifs like transformer blocks
-                        # Note: Hiera parameter monitoring disabled due to different model structure
+                regular_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}"
+                regular_output_path = os.path.join(dir_root_chkpt, regular_output_dir)
 
-                    # ---- Reset for the next iteration
-                    # Flush the gradients
-                    optimizer.zero_grad(set_to_none = True)
+                if dist_rank == 0:
+                    logger.info(f"[CHECKPOINT VERIFICATION] Saving REGULAR checkpoint: {regular_output_dir}")
 
-                    # Reset grad accum counter
-                    grad_nosync_counter = 0
+                checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, regular_output_path)
 
-                    # Reset the loss accumulator
-                    total_loss *= 0.0
+                if dist_rank == 0:
+                    logger.info(f"[CHECKPOINT VERIFICATION] REGULAR checkpoint saved successfully: {regular_output_dir}")
 
-                    # Reset the token accumulator
-                    total_num_tokens *= 0
+                model.train()  # Back to training mode
 
-                    # Reset timer flag
-                    starts_timer = True
+            # Preemptive checkpointing (for HPC time limits)
+            if preempt_metadata_path and is_action_due(step_counter, preempt_chkpt_saving_steps):
+                step_state["step"] = step_counter
+                step_state["loss_min"] = loss_min
+                step_state["timestamp"] = run_timestamp
 
-                    # ---- Update lr every few seg (X segs = one step/iteration)
-                    if is_action_due(iteration_counter, scheduler_update_iterations):
-                        scheduler.step()
-                        if dist_rank == 0:
-                            current_lrs = scheduler.get_lr()
-                            current_lrs_msg = ",".join(f"{lr}" for lr in current_lrs)
-                            logger.info(f"lr is updated to {current_lrs_msg}.")
+                preempt_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_step_{step_counter}.preempt"
+                preempt_output_path = os.path.join(dir_root_chkpt, preempt_output_dir)
 
-                    # ---- Eval and checkpointing
-                    if is_action_due(iteration_counter, chkpt_saving_iterations):
-                        # !!!!!!!!!!!!!!!
-                        # !! Data dump !!
-                        # !!!!!!!!!!!!!!!
-                        data_dump_timestamp = {
-                            "uses_dist"       : uses_dist,
-                            "dist_rank"       : dist_rank,
-                            "dist_world_size" : dist_world_size,
-                        }
-                        if data_dump_on:
-                            data_dump_timestamp.update({
-                                "fl_log_prefix"   : fl_log_prefix,
-                                "epoch"           : epoch,
-                                "seg"             : seg,
-                            })
+                if dist_rank == 0:
+                    logger.info(f"[CHECKPOINT VERIFICATION] Saving PREEMPTIVE checkpoint: {preempt_output_dir}")
 
-                        if dist_rank == 0:
-                            logger.debug('Start evaluation...')
+                checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, preempt_output_path)
 
-                        # ---- - Eval
-                        # ---- -- Train
-                        # Get a random subset of the training set
-                        train_loss = torch.tensor(float('nan'))
-                        num_eval_retry = 0
-                        while torch.isnan(train_loss) and (num_eval_retry < max_eval_retry):
-                            dataset_eval_train.reset()
-                            high_seg_idx = max(dataset_eval_train.total_size - seg_size * dist_world_size, 1)
-                            rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                            dataset_eval_train.set_start_idx(rand_start_idx)
+                # Write metadata file with checkpoint path
+                if dist_rank == 0:
+                    with open(preempt_metadata_path, "w") as f:
+                        f.write(preempt_output_path)
+                    logger.info(f"[CHECKPOINT VERIFICATION] PREEMPTIVE checkpoint saved: {preempt_output_dir}")
+                    logger.info(f"[CHECKPOINT VERIFICATION] Preemptive metadata written to: {preempt_metadata_path}")
 
-                            # Create evaluation dataloader for training set
-                            dataloader_eval, sampler_eval = wrap_with_torch_dataloader(
-                                dataset=dataset_eval_train,
-                                base_seed=base_seed,
-                                drop_last_in_sampler=drop_last_in_sampler,
-                                drop_last_in_loader=drop_last_in_loader,
-                                uses_dist=uses_dist,
-                                batch_size=batch_size,
-                                num_workers=num_workers,
-                                custom_collate=custom_collate,
-                                pin_memory=pin_memory,
-                                prefetch_factor=prefetch_factor,
-                                epoch=rand_start_idx,  # Use rand_start_idx for epoch
-                                is_eval=True,
-                            )
-
-                            # Set epoch for distributed sampler (handled by utility)
-                            if uses_dist and sampler_eval is not None:
-                                sampler_eval.set_epoch(rand_start_idx)
-
-                            # Get loss
-                            train_loss = estimate_loss(
-                                dataloader_eval,
-                                model,
-                                criterion,
-                                autocast_context,
-                                max_iter              = max_eval_iter,
-                                desc                  = '(training set)',
-                                device                = device,
-                                dummy_input_shape     = batch_input_shape,
-                                mixed_precision_dtype = mixed_precision_dtype,
-                                transforms            = transforms,
-                                **data_dump_timestamp,
-                            )
-                            num_eval_retry += 1
-
-                        # Log the train loss
-                        if dist_rank == 0:
-                            seg_start_idx = dataset_eval_train.start_idx
-                            seg_end_idx   = dataset_eval_train.end_idx
-                            logger.info(f"LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean train loss = {train_loss:.8f}")
-
-                        # ---- -- Validation
-                        # Get a random subset of the validation set
-                        validate_loss = torch.tensor(float('nan'))
-                        num_eval_retry = 0
-                        while torch.isnan(validate_loss) and (num_eval_retry < max_eval_retry):
-                            dataset_eval_val.reset()
-                            high_seg_idx = max(dataset_eval_val.total_size - seg_size * dist_world_size, 1)
-                            rand_start_idx = torch.randint(low = 0, high = high_seg_idx, size = (1,)).item()
-                            dataset_eval_val.set_start_idx(rand_start_idx)
-
-                            # Create evaluation dataloader for validation set
-                            dataloader_eval, sampler_eval = wrap_with_torch_dataloader(
-                                dataset=dataset_eval_val,
-                                base_seed=base_seed,
-                                drop_last_in_sampler=drop_last_in_sampler,
-                                drop_last_in_loader=drop_last_in_loader,
-                                uses_dist=uses_dist,
-                                batch_size=batch_size,
-                                num_workers=num_workers,
-                                custom_collate=custom_collate,
-                                pin_memory=pin_memory,
-                                prefetch_factor=prefetch_factor,
-                                epoch=rand_start_idx,  # Use rand_start_idx for epoch
-                                is_eval=True,
-                            )
-
-                            # Set epoch for distributed sampler (handled by utility)
-                            if uses_dist and sampler_eval is not None:
-                                sampler_eval.set_epoch(rand_start_idx)
-
-                            validate_loss = estimate_loss(
-                                dataloader_eval,
-                                model,
-                                criterion,
-                                autocast_context,
-                                max_iter              = max_eval_iter,
-                                desc                  = '(validation set)',
-                                device                = device,
-                                dummy_input_shape     = batch_input_shape,
-                                mixed_precision_dtype = mixed_precision_dtype,
-                                transforms            = transforms,
-                                **data_dump_timestamp,
-                            )
-                            num_eval_retry += 1
-
-                        # Log the validation loss
-                        if dist_rank == 0:
-                            seg_start_idx = dataset_eval_val.start_idx
-                            seg_end_idx   = dataset_eval_val.end_idx
-                            logger.info(f"LOSS:EVAL - epoch {epoch}, seg {seg_start_idx}-{seg_end_idx}, mean validation loss = {validate_loss:.8f}")
-
-                        # ---- - Save checkpoint
-                        if validate_loss < loss_min:
-                            loss_min = validate_loss
-
-                            # Collect training state
-                            iter_state["epoch"]     = epoch
-                            iter_state["seg"]       = seg
-                            iter_state["start_idx"] = dataset_train.start_idx
-                            iter_state["end_idx"]   = dataset_train.end_idx
-                            iter_state["loss_min"]  = loss_min
-
-                            dir_chkpt = f"{timestamp}.epoch_{epoch}.end_idx_{dataset_train.end_idx}"
-                            if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
-                            path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
-                            checkpointer.save(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt)
-                            logger_utils.log_on_all_ranks(logger, f"Saving checkpoint at {path_chkpt}.", "info")
-
-                        # All ranks wait until the end of evaluation by rank 0
-                        # [WARNING] Expecting NCCL TIMEOUT ERROR if the evaluation takes too long
-                        if uses_dist:
-                            dist.barrier()
-                        logger.debug('Done evaluation...')
-
-                    # ---- Preemptive checkpointing
-                    if preempt_metadata_path is not None and is_action_due(iteration_counter, preempt_chkpt_saving_iterations):
-                        # Collect training state
-                        iter_state["epoch"]     = epoch
-                        iter_state["seg"]       = seg
-                        iter_state["start_idx"] = dataset_train.start_idx
-                        iter_state["end_idx"]   = dataset_train.end_idx
-                        iter_state["loss_min"]  = loss_min
-
-                        dir_chkpt = f"{timestamp}.preempt"
-                        if fl_chkpt_prefix is not None: dir_chkpt = f"{fl_chkpt_prefix}.{dir_chkpt}"
-                        path_chkpt = os.path.join(dir_root_chkpt, dir_chkpt)
-                        checkpointer.save(dist_rank, model, optimizer, scheduler, iter_state, path_chkpt)
-                        logger_utils.log_on_all_ranks(logger, f"Saving preemptive checkpoint (epoch {epoch}, end_idx {dataset_train.end_idx}) at {path_chkpt}.", "info")
-
-                        if dist_rank == 0:
-                            with open(preempt_metadata_path, "w") as f:
-                                f.write(path_chkpt)
-                            logger.info(f"Saving preemptive metadata (epoch {epoch}, end_idx {dataset_train.end_idx}) at {preempt_metadata_path}.")
-
-            # [PERFORMANCE]
-            if dist_local_rank == 0:
-                memmax.update()
-
-            # [PERFORMANCE]
-            if dist_local_rank == 0:
-                memmax.stop()
-
-        # Reset last_seg
-        last_seg = -1
-
-        # Reset the from_resume flag
-        from_resume = False
+    # Training completed
+    if dist_rank == 0:
+        logger.info(f"[TRAINING VERIFICATION] Training completed after {step_counter} steps")
+        logger.info(f"[TRAINING VERIFICATION] Final loss_min: {loss_min}")
 
 except KeyboardInterrupt:
     logger_utils.log_on_all_ranks(logger, "Training was interrupted!", "error")
