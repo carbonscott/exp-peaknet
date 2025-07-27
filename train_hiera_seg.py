@@ -347,10 +347,11 @@ pre_transforms = (
 )
 transforms = None
 
-# -- Set up cache directory and path
+# -- Set up cache directory and paths (separate for train/val to avoid collision)
 cache_dir = "experiments/cache"
 os.makedirs(cache_dir, exist_ok=True)
-global_index_cache_path = f"{cache_dir}/{fl_chkpt_prefix}_global_index_cache.pkl"
+train_global_index_cache_path = f"{cache_dir}/{fl_chkpt_prefix}_train_global_index_cache.pkl"
+val_global_index_cache_path = f"{cache_dir}/{fl_chkpt_prefix}_val_global_index_cache.pkl"
 
 # -- Set up training set
 dataset_train_config = PeakNetDatasetConfig(
@@ -364,7 +365,7 @@ dataset_train_config = PeakNetDatasetConfig(
     uses_norm=True,
     scales_variance=True,
     perfs_runtime=False,
-    global_index_cache=global_index_cache_path,
+    global_index_cache=train_global_index_cache_path,
 )
 dataset_train = PeakNetDataset(dataset_train_config)
 
@@ -384,7 +385,7 @@ dataset_eval_val_config = PeakNetDatasetConfig(
     uses_norm=True,
     scales_variance=True,
     perfs_runtime=False,
-    global_index_cache=global_index_cache_path,
+    global_index_cache=val_global_index_cache_path,
 )
 dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
 
