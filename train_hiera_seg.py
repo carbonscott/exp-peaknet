@@ -369,6 +369,10 @@ dataset_train_config = PeakNetDatasetConfig(
 )
 dataset_train = PeakNetDataset(dataset_train_config)
 
+# Log dataset sizes for distributed training verification
+if dist_rank == 0:
+    logger.info(f"Distributed training dataset sizes - Training: {len(dataset_train)} samples per rank")
+
 # -- Set up eval set
 # --- For training loss
 dataset_eval_train = PeakNetDataset(dataset_train_config)
@@ -388,6 +392,10 @@ dataset_eval_val_config = PeakNetDatasetConfig(
     global_index_cache=val_global_index_cache_path,
 )
 dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
+
+# Log validation dataset size for monitoring
+if dist_rank == 0:
+    logger.info(f"Validation dataset: {len(dataset_eval_val)} samples per rank")
 
 # -- Custom collate to merge patch and batch dimension using concatenation
 custom_collate = None
@@ -638,7 +646,7 @@ infinite_dataloader, sampler, batches_per_epoch = create_infinite_dataloader(
     base_seed=base_seed,
     drop_last_in_sampler=drop_last_in_sampler,
     drop_last_in_loader=drop_last_in_loader,
-    uses_dist=uses_dist,
+    uses_distributed_sampler=False,  # Fix: Eliminate double distribution, let PeakNetDataset handle distribution
     batch_size=batch_size,
     num_workers=num_workers,
     pin_memory=pin_memory,
@@ -652,6 +660,12 @@ if dist_rank == 0:
     logger.info(f"[TRAINING] Scheduler update every {scheduler_update_steps} steps")
     logger.info(f"[TRAINING] Gradient accumulation steps: {grad_accum_steps}")
     logger.info(f"[TRAINING] Batches per epoch: {batches_per_epoch}")
+
+    # Log training configuration for monitoring
+    logger.info(f"Training configuration - Batches per epoch: {batches_per_epoch}, "
+                f"Batch size: {batch_size}, World size: {dist_world_size}, "
+                f"Samples per rank: {len(dataset_train)}, "
+                f"Drop last (sampler/loader): {drop_last_in_sampler}/{drop_last_in_loader}")
 
 try:
     model.train()
@@ -777,7 +791,7 @@ try:
                         base_seed=base_seed,
                         drop_last_in_sampler=drop_last_in_sampler,
                         drop_last_in_loader=drop_last_in_loader,
-                        uses_dist=uses_dist,
+                        uses_distributed_sampler=False,  # Fix: Eliminate double distribution, let PeakNetDataset handle distribution
                         batch_size=batch_size,
                         num_workers=num_workers,
                         custom_collate=custom_collate,
@@ -787,8 +801,11 @@ try:
                         is_eval=True,
                     )
 
-                    if uses_dist and sampler_eval is not None:
-                        sampler_eval.set_epoch(0)
+                    # No sampler.set_epoch() call needed since not using DistributedSampler
+
+                    # Log evaluation dataloader info
+                    if dist_rank == 0:
+                        logger.info(f"Evaluation dataloaders - Training eval: {len(eval_dataloader_train)} batches")
 
                     train_eval_loss = estimate_loss(
                         eval_dataloader_train,
@@ -813,7 +830,7 @@ try:
                         base_seed=base_seed,
                         drop_last_in_sampler=drop_last_in_sampler,
                         drop_last_in_loader=drop_last_in_loader,
-                        uses_dist=uses_dist,
+                        uses_distributed_sampler=False,  # Fix: Eliminate double distribution, let PeakNetDataset handle distribution
                         batch_size=batch_size,
                         num_workers=num_workers,
                         custom_collate=custom_collate,
@@ -823,8 +840,11 @@ try:
                         is_eval=True,
                     )
 
-                    if uses_dist and sampler_eval is not None:
-                        sampler_eval.set_epoch(0)
+                    # No sampler.set_epoch() call needed since not using DistributedSampler
+
+                    # Log validation evaluation info
+                    if dist_rank == 0:
+                        logger.info(f"Validation eval dataloader: {len(eval_dataloader_val)} batches")
 
                     val_eval_loss = estimate_loss(
                         eval_dataloader_val,
@@ -875,7 +895,7 @@ try:
                     if dist_rank == 0:
                         logger.info(f"[CHECKPOINT] Saving BEST checkpoint: {best_output_dir}")
 
-                    checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, best_output_path)
+                    ## checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, best_output_path)
 
                     if dist_rank == 0:
                         logger.info(f"[CHECKPOINT] BEST checkpoint saved successfully: {best_output_dir} (val_loss={eval_loss:.6f})")
@@ -895,7 +915,7 @@ try:
                 if dist_rank == 0:
                     logger.info(f"[CHECKPOINT] Saving PREEMPTIVE checkpoint: {preempt_output_dir}")
 
-                checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, preempt_output_path)
+                ## checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, preempt_output_path)
 
                 # Write metadata file with checkpoint path
                 if dist_rank == 0:
