@@ -48,6 +48,10 @@ DECODER_NUM_HEADS=24
 # [DATASET] - Using working zarr dataset
 PATH_TRAIN="pretrain/train.csv"
 PATH_EVAL="pretrain/eval.csv"
+ENABLE_SHUFFLING_TRAIN=true
+ENABLE_SHUFFLING_EVAL=false  # Keep eval deterministic
+SHUFFLE_SEED_BASE=42
+RESHUFFLE_FREQUENCY=10  # Reshuffle every 10 steps for testing
 
 # [LOSS]
 FOCAL_ALPHA="[0.25, 0.75]"
@@ -82,6 +86,10 @@ train_config.checkpoint.chkpt_saving_steps=$CHKPT_SAVING_STEPS \
 train_config.checkpoint.offload_to_cpu=$OFFLOAD_TO_CPU \
 "train_config.dataset.path_train=$PATH_TRAIN" \
 "train_config.dataset.path_eval=$PATH_EVAL" \
+train_config.dataset.enable_shuffling_train=$ENABLE_SHUFFLING_TRAIN \
+train_config.dataset.enable_shuffling_eval=$ENABLE_SHUFFLING_EVAL \
+train_config.dataset.shuffle_seed_base=$SHUFFLE_SEED_BASE \
+train_config.dataset.reshuffle_frequency=$RESHUFFLE_FREQUENCY \
 train_config.dataset.num_workers=$NUM_WORKERS \
 train_config.dataset.prefetch_factor=4 \
 train_config.dataset.pin_memory=true \

@@ -21,6 +21,11 @@ dataset:
   path_eval           : experiments/datasets/safetensor_dataset.validate.csv
   debug               : false
   cache_size          : 10
+  # Cross-rank shuffling configuration
+  enable_shuffling_train: false  # Disabled by default in base config
+  enable_shuffling_eval: false   # Keep evaluation deterministic
+  shuffle_seed_base: 42          # Base seed for deterministic shuffling
+  reshuffle_frequency: 0         # Steps between reshuffles (0 = no reshuffling)
   transforms:
     H_pad: 1920
     W_pad: 1920

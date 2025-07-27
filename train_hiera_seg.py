@@ -93,7 +93,7 @@ if 'OMP_NUM_THREADS' not in os.environ:
     processes_per_node = int(os.environ.get('LOCAL_WORLD_SIZE', '2'))
     optimal_threads = max(1, total_cores // processes_per_node)
     torch.set_num_threads(optimal_threads)
-    logger.info(f"Set optimal thread count: {optimal_threads} (total_cores={total_cores}, processes_per_node={processes_per_node})")
+    # Note: Logger not yet defined, thread count set to {optimal_threads}
 
 # -- Distributed Data Parallel (DDP)
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -366,6 +366,9 @@ dataset_train_config = PeakNetDatasetConfig(
     scales_variance=True,
     perfs_runtime=False,
     global_index_cache=train_global_index_cache_path,
+    enable_shuffling=config.dataset.get('enable_shuffling_train', False),
+    shuffle_seed_base=config.dataset.get('shuffle_seed_base', 42),
+    reshuffle_frequency=config.dataset.get('reshuffle_frequency', 0)
 )
 dataset_train = PeakNetDataset(dataset_train_config)
 
@@ -390,6 +393,9 @@ dataset_eval_val_config = PeakNetDatasetConfig(
     scales_variance=True,
     perfs_runtime=False,
     global_index_cache=val_global_index_cache_path,
+    enable_shuffling=config.dataset.get('enable_shuffling_eval', False),
+    shuffle_seed_base=config.dataset.get('shuffle_seed_base', 42),
+    reshuffle_frequency=config.dataset.get('reshuffle_frequency', 0)
 )
 dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
 
@@ -602,6 +608,13 @@ if from_resume:
         starting_step = step_state.get("step", 0) + 1  # Resume from next step
         loss_min = step_state.get("loss_min", loss_min)
 
+        # Restore dataset shuffle state if available
+        if "dataset_shuffle_state" in step_state:
+            dataset_train.restore_checkpoint_state(step_state["dataset_shuffle_state"])
+            logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Restored dataset shuffle state", "info")
+        else:
+            logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] No dataset shuffle state found in checkpoint", "info")
+
         # Log resumption info
         logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Loading from checkpoint -- {path_chkpt_prev}", "info")
         logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Resuming from step: {starting_step-1}-->{starting_step} , loss_min (eval val): {loss_min}", "info")
@@ -751,6 +764,9 @@ try:
             # Increment step counter only after parameter update
             step_counter += 1
 
+            # [SHUFFLE] Trigger reshuffling if needed
+            dataset_train.maybe_reshuffle(step_counter)
+
             # [PERFORMANCE] Update memory monitoring
             if dist_local_rank == 0:
                 memmax.update()
@@ -888,6 +904,8 @@ try:
                     step_state["step"] = step_counter
                     step_state["loss_min"] = loss_min
                     step_state["timestamp"] = run_timestamp
+                    # Save dataset shuffle state for resumption
+                    step_state["dataset_shuffle_state"] = dataset_train.get_checkpoint_state()
 
                     best_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_best_step_{step_counter}"
                     best_output_path = os.path.join(dir_root_chkpt, best_output_dir)
@@ -908,6 +926,8 @@ try:
                 step_state["step"] = step_counter
                 step_state["loss_min"] = loss_min
                 step_state["timestamp"] = run_timestamp
+                # Save dataset shuffle state for resumption
+                step_state["dataset_shuffle_state"] = dataset_train.get_checkpoint_state()
 
                 preempt_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}.preempt"
                 preempt_output_path = os.path.join(dir_root_chkpt, preempt_output_dir)

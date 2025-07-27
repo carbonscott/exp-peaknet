@@ -1,0 +1,117 @@
+checkpoint:
+  state_dict_type: sharded
+  chkpt_saving_steps: 1000
+  preempt_metadata_path: preempt/hiera-ddp-training
+  preempt_chkpt_saving_steps: 100
+  directory: experiments/chkpts
+  prefix: hiera-ddp-training
+  path_chkpt_prev: null
+  offload_to_cpu: false
+  rank0_only: false
+
+dataset:
+  drop_last_in_sampler: true
+  drop_last_in_loader: true
+  batch_size: 2  # Conservative starting point for Hiera-Huge
+  num_workers: 2
+  pin_memory: true
+  prefetch_factor: 2
+  seg_size: 100
+  path_train: experiments/datasets/peaknet_dataset.train.csv  
+  path_eval: experiments/datasets/peaknet_dataset.validate.csv
+  debug: false
+  cache_size: 10
+  # Cross-rank shuffling configuration
+  enable_shuffling_train: true   # Enable shuffling for training dataset
+  enable_shuffling_eval: false   # Keep evaluation deterministic
+  shuffle_seed_base: 42          # Base seed for deterministic shuffling
+  reshuffle_frequency: 10        # Steps between reshuffles (0 = no reshuffling)
+  transforms:
+    # Pad to ensure we can always get 512x512 crops
+    H_pad: 1920
+    W_pad: 1920
+    # Polar center crop to 512x512 for Hiera
+    Hv: 512
+    Wv: 512
+    sigma: 0.33
+    num_crop: 1
+    # Transform pipeline optimized for 512x512 Hiera
+    set:
+      pad: true
+      polar_center_crop: true
+      random_patch: false
+      random_rotate: false
+      random_shift: false
+      batch_sampler: false
+
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: bfloat16
+  cpu_offload: null
+
+logging:
+  directory: experiments/logs
+  prefix: hiera-ddp-training
+  level: INFO
+
+loss:
+  grad_accum_steps: 1
+  focal:
+    alpha: [0.25, 0.75]
+    gamma: 2.0
+
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_steps: 10000000  # 10M steps for long training
+  warmup_steps: 1000
+  scheduler_update_steps: 1
+
+misc:
+  max_eval_iter: 10
+  max_eval_retry: 2
+  sharding_stage: zero0  # DDP mode
+  compiles_model: false
+  data_dump_on: false
+  cpu_only: false
+  peak_flops_per_sec: 312000000000000.0
+  monitors_dynamics: true
+
+model:
+  from_scratch: true
+  hiera:
+    # Segmentation-specific parameters
+    num_classes: 2
+    decoder_embed_dim: 768  # Larger for Huge model
+    decoder_depth: 12       # Deeper decoder
+    decoder_num_heads: 24   # More heads
+    
+    # Hiera-Huge architecture parameters
+    input_size: [512, 512]
+    in_chans: 1
+    embed_dim: 192          # Huge model embed dim
+    num_heads: 3            # Base heads for Huge
+    stages: [2, 6, 48, 4]   # Hiera-Huge depth configuration
+    q_pool: 3
+    q_stride: [2, 2]
+    mask_unit_size: [16, 16]
+    mask_unit_attn: [true, true, false, false]
+    dim_mul: 2.0            # Standard multiplier
+    head_mul: 2.0           # Standard head multiplier  
+    patch_kernel: [7, 7]
+    patch_stride: [4, 4]
+    patch_padding: [3, 3]
+    mlp_ratio: 4.0
+    drop_path_rate: 0.1
+    norm_layer: "LayerNorm"
+    head_dropout: 0.0
+    head_init_scale: 0.001
+    sep_pos_embed: false
+
+optim:
+  grad_clip: 1.0
+  lr: 1e-4
+  weight_decay: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  fused: false
