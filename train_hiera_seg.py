@@ -760,12 +760,6 @@ try:
                 current_lrs = scheduler.get_lr()
                 logger.info(f"Step {step_counter}: loss={loss:.6f}, lr={current_lrs[0]:.2e}")
 
-            # Enhanced logging for stress testing (every step near checkpoints)
-            if step_counter % chkpt_saving_steps == 0 or step_counter % chkpt_saving_steps == 1:
-                if dist_rank == 0:
-                    current_lrs = scheduler.get_lr()
-                    logger.info(f"[STRESS TEST] Step {step_counter}: loss={loss:.8f}, lr={current_lrs[0]:.2e} (checkpoint boundary)")
-
             # Checkpointing
             if is_action_due(step_counter, chkpt_saving_steps):
                 if dist_rank == 0:
