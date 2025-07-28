@@ -804,6 +804,10 @@ try:
                 # Evaluation
                 model.eval()
 
+                # Trigger reshuffling for both eval datasets before evaluation
+                dataset_eval_train.maybe_reshuffle(step_counter)
+                dataset_eval_val.maybe_reshuffle(step_counter)
+
                 with torch.no_grad():
                     # Training set
                     eval_dataloader_train, sampler_eval = wrap_with_torch_dataloader(
