@@ -1,7 +1,8 @@
 #!/bin/bash
 
 RUNS_NSYS=0
-NUM_MPI_TASKS=10  # Use all 10 GPUs
+CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,7,8,9"  # Exclude GPU 6 (ECC error)
+NUM_MPI_TASKS=9  # Should match number of GPUs in CUDA_VISIBLE_DEVICES
 
 # [NEW OPTIONS]
 TARGET_FACILITY="s3df"        # Which facility to target (s3df, nersc, summit)
@@ -27,8 +28,8 @@ USES_BATCH_SAMPLER=false
 USES_RANDOM_PATCH=false
 USES_RANDOM_ROTATE=false
 USES_RANDOM_SHIFT=false
-PATH_CHKPT_PREV=null
-PREEMPT_CHKPT_SAVING_STEPS=1  # Save every 20 iterations (set to null to disable)
+PATH_CHKPT_PREV=experiments/chkpts/hiera-ddp-training_2025_0727_2232.preempt
+PREEMPT_CHKPT_SAVING_STEPS=20  # Save every 20 iterations (set to null to disable)
 CHKPT_SAVING_STEPS=100         # Set to null to disable checkpointing during debugging
 GRAD_ACCUM_STEPS=1
 SHARDING_STAGE="zero0"  # DDP mode
@@ -181,7 +182,7 @@ echo "🏃 Running training directly (local execution)..."
 
 base_command="torchrun --nproc_per_node=$NUM_MPI_TASKS --nnodes=1 --node_rank=0 train_hiera_seg.py experiments/yaml/$JOB.yaml"
 ## base_command="mpirun -n $NUM_MPI_TASKS --map-by ppr:${NUM_MPI_TASKS}:node --bind-to none python train_hiera_seg.py experiments/yaml/$JOB.yaml"
-final_command="OMP_NUM_THREADS=1 "
+final_command="CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES OMP_NUM_THREADS=1 "
 
 if [ $RUNS_NSYS -eq 1 ]; then
     final_command+="nsys profile -w true -t cuda --wait primary -o /sdf/data/lcls/ds/prj/prjcwang31/results/proj-peaknet/nsight_reports/$JOB.profile -f true --cudabacktrace=true -x true "
