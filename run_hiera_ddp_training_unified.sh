@@ -28,10 +28,10 @@ USES_RANDOM_PATCH=false
 USES_RANDOM_ROTATE=false
 USES_RANDOM_SHIFT=false
 PATH_CHKPT_PREV=null
-PREEMPT_CHKPT_SAVING_STEPS=20  # Save every 20 iterations
-CHKPT_SAVING_STEPS=100
+PREEMPT_CHKPT_SAVING_STEPS=20  # Save every 20 iterations (set to null to disable)
+CHKPT_SAVING_STEPS=100         # Set to null to disable checkpointing during debugging
 GRAD_ACCUM_STEPS=1
-WARMUP=1000
+WARMUP=20
 SHARDING_STAGE="zero0"  # DDP mode
 OFFLOAD_TO_CPU=false
 
@@ -49,9 +49,9 @@ DECODER_NUM_HEADS=24
 PATH_TRAIN="pretrain/train.csv"
 PATH_EVAL="pretrain/eval.csv"
 ENABLE_SHUFFLING_TRAIN=true
-ENABLE_SHUFFLING_EVAL=false  # Keep eval deterministic
+ENABLE_SHUFFLING_EVAL=true
 SHUFFLE_SEED_BASE=42
-RESHUFFLE_FREQUENCY=10  # Reshuffle every 10 steps for testing
+RESHUFFLE_FREQUENCY=100
 
 # [LOSS]
 FOCAL_ALPHA="[0.25, 0.75]"
@@ -119,7 +119,7 @@ train_config.optim.lr=0.0001 \
 train_config.optim.fused=false \
 train_config.misc.monitors_dynamics=true \
 train_config.misc.compiles_model=false \
-train_config.misc.max_eval_iter=10 \
+train_config.misc.max_eval_iter=20 \
 "train_config.misc.sharding_stage=$SHARDING_STAGE" \
 train_config.misc.data_dump_on=false \
 train_config.lr_scheduler.warmup_steps=$WARMUP \

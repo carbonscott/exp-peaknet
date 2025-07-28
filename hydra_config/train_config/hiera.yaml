@@ -1,8 +1,8 @@
 checkpoint:
   state_dict_type: sharded
-  chkpt_saving_steps: 1000
+  chkpt_saving_steps: 1000      # Set to null to disable checkpointing during debugging
   preempt_metadata_path: preempt/hiera-ddp-training
-  preempt_chkpt_saving_steps: 100
+  preempt_chkpt_saving_steps: 100  # Set to null to disable preemptive checkpointing during debugging
   directory: experiments/chkpts
   prefix: hiera-ddp-training
   path_chkpt_prev: null

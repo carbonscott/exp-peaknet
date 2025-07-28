@@ -378,7 +378,9 @@ if dist_rank == 0:
 
 # -- Set up eval set
 # --- For training loss
-dataset_eval_train = PeakNetDataset(dataset_train_config)
+dataset_eval_train_config = dataset_train_config.copy()
+dataset_eval_train_config.reshuffle_frequency = 1
+dataset_eval_train = PeakNetDataset(dataset_eval_train_config)
 
 # --- For val loss
 dataset_eval_val_config = PeakNetDatasetConfig(
@@ -395,7 +397,7 @@ dataset_eval_val_config = PeakNetDatasetConfig(
     global_index_cache=val_global_index_cache_path,
     enable_shuffling=config.dataset.get('enable_shuffling_eval', False),
     shuffle_seed_base=config.dataset.get('shuffle_seed_base', 42),
-    reshuffle_frequency=config.dataset.get('reshuffle_frequency', 0)
+    reshuffle_frequency=1,  # Shuffle after every eval
 )
 dataset_eval_val = PeakNetDataset(dataset_eval_val_config)
 
@@ -596,6 +598,7 @@ step_state = dict(
     step        = starting_step,
     loss_min    = loss_min,
     timestamp   = run_timestamp,
+    dataset_shuffle_state = None,
 )
 
 # -- Optional resumption
@@ -609,8 +612,9 @@ if from_resume:
         loss_min = step_state.get("loss_min", loss_min)
 
         # Restore dataset shuffle state if available
-        if "dataset_shuffle_state" in step_state:
-            dataset_train.restore_checkpoint_state(step_state["dataset_shuffle_state"])
+        dataset_shuffle_state = step_state.get("dataset_shuffle_state")
+        if dataset_shuffle_state is not None:
+            dataset_train.restore_checkpoint_state(dataset_shuffle_state)
             logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Restored dataset shuffle state", "info")
         else:
             logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] No dataset shuffle state found in checkpoint", "info")
@@ -913,7 +917,7 @@ try:
                     if dist_rank == 0:
                         logger.info(f"[CHECKPOINT] Saving BEST checkpoint: {best_output_dir}")
 
-                    ## checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, best_output_path)
+                    checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, best_output_path)
 
                     if dist_rank == 0:
                         logger.info(f"[CHECKPOINT] BEST checkpoint saved successfully: {best_output_dir} (val_loss={eval_loss:.6f})")
@@ -935,7 +939,7 @@ try:
                 if dist_rank == 0:
                     logger.info(f"[CHECKPOINT] Saving PREEMPTIVE checkpoint: {preempt_output_dir}")
 
-                ## checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, preempt_output_path)
+                checkpointer.save(dist_rank, model, optimizer, scheduler, step_state, preempt_output_path)
 
                 # Write metadata file with checkpoint path
                 if dist_rank == 0:
