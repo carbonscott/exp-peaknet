@@ -378,8 +378,8 @@ if dist_rank == 0:
 
 # -- Set up eval set
 # --- For training loss
-dataset_eval_train_config = dataset_train_config.copy()
-dataset_eval_train_config.reshuffle_frequency = 1
+from dataclasses import replace
+dataset_eval_train_config = replace(dataset_train_config, reshuffle_frequency=1)
 dataset_eval_train = PeakNetDataset(dataset_eval_train_config)
 
 # --- For val loss
