@@ -370,7 +370,7 @@ dataset_train_config = PeakNetDatasetConfig(
     shuffle_seed_base=config.dataset.get('shuffle_seed_base', 42),
     reshuffle_frequency=config.dataset.get('reshuffle_frequency', 0)
 )
-dataset_train = PeakNetDataset(dataset_train_config)
+dataset_train = PeakNetDataset(dataset_train_config)  # Start from scratch (defaults to global_samples_processed=0)
 
 # Log dataset sizes for distributed training verification
 if dist_rank == 0:
@@ -611,13 +611,19 @@ if from_resume:
         starting_step = step_state.get("step", 0) + 1  # Resume from next step
         loss_min = step_state.get("loss_min", loss_min)
 
-        # Restore dataset shuffle state if available
+        # Calculate global progress from checkpoint and recreate dataset with elegant redistribution
+        global_samples_processed = starting_step * batch_size * dist_world_size
+        dataset_train = PeakNetDataset(dataset_train_config, global_samples_processed)
+
+        # Restore only global shuffle state if available
         dataset_shuffle_state = step_state.get("dataset_shuffle_state")
         if dataset_shuffle_state is not None:
             dataset_train.restore_checkpoint_state(dataset_shuffle_state)
-            logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Restored dataset shuffle state", "info")
+            logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Restored global shuffle state", "info")
         else:
-            logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] No dataset shuffle state found in checkpoint", "info")
+            logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] No shuffle state found, using defaults", "info")
+
+        logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Dataset recreated with global progress: {global_samples_processed}", "info")
 
         # Log resumption info
         logger_utils.log_on_all_ranks(logger, f"[RESUMPTION] Loading from checkpoint -- {path_chkpt_prev}", "info")
@@ -768,6 +774,9 @@ try:
             # Increment step counter only after parameter update
             step_counter += 1
 
+            # [PROGRESS] Advance dataset progress sequentially  
+            dataset_train.advance_progress(batch_size)
+
             # [SHUFFLE] Trigger reshuffling if needed
             dataset_train.maybe_reshuffle(step_counter)
 
@@ -912,7 +921,9 @@ try:
                     step_state["step"] = step_counter
                     step_state["loss_min"] = loss_min
                     step_state["timestamp"] = run_timestamp
-                    # Save dataset shuffle state for resumption
+                    # Save global dataset progress for world-size agnostic resumption
+                    step_state["global_samples_processed"] = step_counter * batch_size * dist_world_size
+                    # Save simplified dataset shuffle state for resumption
                     step_state["dataset_shuffle_state"] = dataset_train.get_checkpoint_state()
 
                     best_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}_best_step_{step_counter}"
@@ -934,7 +945,9 @@ try:
                 step_state["step"] = step_counter
                 step_state["loss_min"] = loss_min
                 step_state["timestamp"] = run_timestamp
-                # Save dataset shuffle state for resumption
+                # Save global dataset progress for world-size agnostic resumption
+                step_state["global_samples_processed"] = step_counter * batch_size * dist_world_size
+                # Save simplified dataset shuffle state for resumption
                 step_state["dataset_shuffle_state"] = dataset_train.get_checkpoint_state()
 
                 preempt_output_dir = f"{fl_chkpt_prefix}_{run_timestamp}.preempt"
