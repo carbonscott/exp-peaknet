@@ -960,6 +960,9 @@ try:
 
                 # Write metadata file with checkpoint path
                 if dist_rank == 0:
+                    # Ensure parent directory exists for preempt metadata path
+                    if preempt_metadata_path:
+                        os.makedirs(os.path.dirname(preempt_metadata_path), exist_ok=True)
                     with open(preempt_metadata_path, "w") as f:
                         f.write(preempt_output_path)
                     logger.info(f"[CHECKPOINT] PREEMPTIVE checkpoint saved: {preempt_output_dir}")
