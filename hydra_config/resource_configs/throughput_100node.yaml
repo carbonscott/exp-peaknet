@@ -1,0 +1,13 @@
+walltime           : "02:00:00"  # Short for throughput testing
+job                : "throughput-100node-test"
+num_nodes          : 100
+num_tasks          : 1000  # 100 nodes * 10 GPUs per node
+partition          : ada
+qos                : ""
+trainer            : 'train_hiera_seg.py'
+yaml_config        : 'throughput-test.yaml'
+OMP_NUM_THREADS    : 1
+transformers_cache : $HOME/.cache/huggingface
+num_gpus_per_node  : 10
+num_cpus_per_task  : 2
+exclude_nodes      : ""
