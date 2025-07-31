@@ -1,0 +1,121 @@
+# Training configuration matching run_hiera_ddp_training_unified.sh
+# This replaces all 55+ parameter overrides with a single train_config=hiera_huge
+
+checkpoint:
+  state_dict_type: sharded
+  chkpt_saving_steps: 100      # Set to null to disable checkpointing during debugging
+  preempt_chkpt_saving_steps: 20  # Save every 20 iterations (set to null to disable)
+  directory: experiments/chkpts
+  prefix: hiera-ddp-training
+  path_chkpt_prev: experiments/chkpts/hiera-ddp-training_2025_0727_2232.preempt
+  offload_to_cpu: false
+  rank0_only: false
+
+dataset:
+  drop_last_in_sampler: true
+  drop_last_in_loader: true
+  batch_size: 40  # From BATCH_SIZE in shell script
+  num_workers: 2  # From NUM_WORKERS in shell script
+  pin_memory: true
+  prefetch_factor: 4
+  seg_size: 100
+  path_train: pretrain/train.csv    # From PATH_TRAIN in shell script
+  path_eval: pretrain/eval.csv      # From PATH_EVAL in shell script
+  debug: false
+  cache_size: 10
+  
+  # Cross-rank shuffling configuration - From shell script
+  enable_shuffling_train: true      # From ENABLE_SHUFFLING_TRAIN
+  enable_shuffling_eval: true       # From ENABLE_SHUFFLING_EVAL
+  shuffle_seed_base: 42             # From SHUFFLE_SEED_BASE
+  reshuffle_frequency: 100          # From RESHUFFLE_FREQUENCY
+  
+  transforms:
+    # Transform dimensions - From shell script
+    H_pad: 1920     # From H_PAD
+    W_pad: 1920     # From W_PAD
+    Hv: 512         # From HV (polar crop size)
+    Wv: 512         # From WV (polar crop size)
+    sigma: 0.33
+    num_crop: 1
+    
+    # Transform pipeline - From USES_* variables in shell script
+    set:
+      pad: true                     # From USES_PAD
+      polar_center_crop: true       # From USES_POLAR_CENTER_CROP
+      batch_sampler: false          # From USES_BATCH_SAMPLER  
+      random_patch: false           # From USES_RANDOM_PATCH
+      random_rotate: false          # From USES_RANDOM_ROTATE
+      random_shift: false           # From USES_RANDOM_SHIFT
+
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: bfloat16        # From shell script train_config.dist.dtype=bfloat16
+  cpu_offload: null
+
+logging:
+  directory: experiments/logs
+  prefix: hiera-ddp-training  # From shell script train_config.logging.prefix=$JOB
+  level: INFO
+
+loss:
+  grad_accum_steps: 1         # From GRAD_ACCUM_STEPS in shell script
+  focal:
+    alpha: [0.25, 0.75]       # From FOCAL_ALPHA in shell script
+    gamma: 2.0                # From FOCAL_GAMMA in shell script
+
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_steps: 10000          # From LR_TOTAL_STEPS in shell script
+  warmup_steps: 20            # From LR_WARMUP in shell script
+  scheduler_update_steps: 1
+
+misc:
+  max_eval_iter: 20           # From MAX_EVAL_ITER in shell script
+  max_eval_retry: 2
+  sharding_stage: zero0       # From SHARDING_STAGE in shell script (DDP mode)
+  compiles_model: false       # From shell script
+  data_dump_on: false         # From shell script
+  cpu_only: false
+  peak_flops_per_sec: 312000000000000.0
+  monitors_dynamics: true     # From shell script
+
+model:
+  from_scratch: true
+  hiera:
+    # Segmentation-specific parameters
+    num_classes: 2
+    decoder_embed_dim: 768    # From DECODER_EMBED_DIM in shell script
+    decoder_depth: 12         # From DECODER_DEPTH in shell script
+    decoder_num_heads: 24     # From DECODER_NUM_HEADS in shell script
+    
+    # Hiera-Huge architecture parameters - From shell script MODEL section
+    input_size: [512, 512]
+    in_chans: 1
+    embed_dim: 192            # From EMBED_DIM in shell script
+    num_heads: 3              # From NUM_HEADS in shell script
+    stages: [2, 6, 48, 4]     # From STAGES in shell script (Hiera-Huge configuration)
+    q_pool: 3
+    q_stride: [2, 2]
+    mask_unit_size: [16, 16]
+    mask_unit_attn: [true, true, false, false]
+    dim_mul: 2.0              # From DIM_MUL in shell script
+    head_mul: 2.0             # From HEAD_MUL in shell script
+    patch_kernel: [7, 7]
+    patch_stride: [4, 4]
+    patch_padding: [3, 3]
+    mlp_ratio: 4.0
+    drop_path_rate: 0.1
+    norm_layer: "LayerNorm"
+    head_dropout: 0.0
+    head_init_scale: 0.001
+    sep_pos_embed: false
+
+optim:
+  grad_clip: 1.0
+  lr: 0.0001      # From shell script train_config.optim.lr=0.0001
+  weight_decay: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  fused: false    # From shell script train_config.optim.fused=false
