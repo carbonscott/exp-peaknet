@@ -1,0 +1,33 @@
+# Config for throughput testing - minimal steps, focus on measurement
+defaults:
+  - _self_
+  - /checkpoint: base_fsdp
+  - /dataset: base
+  - /lr_scheduler: base
+  - /model: hiera_base
+  - /data_aug: base
+
+_name: throughput_test
+
+# Short run for throughput measurement
+lr_scheduler:
+  total_steps: 50  # Very short for throughput testing
+  warmup_steps: 5
+
+checkpoint:
+  sharding_stage: zero3  # FSDP sharding
+  state_dict_type: sharded
+  frequency: 999999  # Disable checkpointing for pure throughput
+  
+# Keep other parameters same as production for realistic throughput measurement
+model:
+  _name: hiera_base
+
+logging:
+  frequency: 5  # More frequent logging to capture throughput metrics
+  profile_steps: [10, 15, 20]  # Profile a few steps for analysis
+
+# Dataset config - use full dataset for realistic I/O patterns  
+dataset:
+  _name: base
+  # Keep realistic batch sizes and transforms
