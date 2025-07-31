@@ -1,0 +1,18 @@
+# Frontier 100-node configuration (800 GPUs total)
+walltime: "02:00:00"  # Adjust based on your needs
+job: "frontier-100node-throughput"
+num_nodes: 100
+num_tasks: 800  # 100 nodes * 8 GPUs per node
+partition: batch
+qos: ""  # Or "debug" for short test runs
+trainer: 'train_hiera_seg.py'
+yaml_config: 'throughput-test.yaml'
+OMP_NUM_THREADS: 1
+transformers_cache: $HOME/.cache/huggingface
+num_gpus_per_node: 8  # 8 GCDs per node on Frontier
+num_cpus_per_task: 7  # 7 due to low-noise mode
+exclude_nodes: ""
+account: ""  # User must provide their ORNL project ID
+rocm_version: "6.2.4"
+nccl_debug: "INFO"
+core_spec_override: "0"  # Use all available cores

@@ -1,0 +1,118 @@
+# Test configuration for Frontier based on hiera.yaml
+checkpoint:
+  state_dict_type: sharded
+  chkpt_saving_steps: 10      # Save frequently for testing
+  preempt_metadata_path: preempt/frontier-test
+  preempt_chkpt_saving_steps: 5  # Save preempt checkpoints frequently
+  directory: experiments/chkpts
+  prefix: frontier-test
+  path_chkpt_prev: null
+  offload_to_cpu: false
+  rank0_only: false
+
+dataset:
+  drop_last_in_sampler: true
+  drop_last_in_loader: true
+  batch_size: 2  # Small batch for testing
+  num_workers: 2
+  pin_memory: true
+  prefetch_factor: 2
+  seg_size: 10  # Small segment size for quick testing
+  path_train: pretrain/train.csv  
+  path_eval: pretrain/eval.csv
+  debug: true  # Enable debug mode
+  cache_size: 5
+  # Cross-rank shuffling configuration
+  enable_shuffling_train: false   # Disable for testing
+  enable_shuffling_eval: false   
+  shuffle_seed_base: 42          
+  reshuffle_frequency: 0        
+  transforms:
+    # Smaller sizes for testing
+    H_pad: 512
+    W_pad: 512
+    # Smaller crop for testing
+    Hv: 256
+    Wv: 256
+    sigma: 0.33
+    num_crop: 1
+    # Simple transform pipeline for testing
+    set:
+      pad: true
+      polar_center_crop: true
+      random_patch: false
+      random_rotate: false
+      random_shift: false
+      batch_sampler: false
+
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: float32  # Use float32 for testing stability
+  cpu_offload: null
+
+logging:
+  directory: experiments/logs
+  prefix: frontier-test
+  level: DEBUG  # More verbose for testing
+
+loss:
+  grad_accum_steps: 1
+  focal:
+    alpha: [0.25, 0.75]
+    gamma: 2.0
+
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_steps: 50  # Very short for testing
+  warmup_steps: 5
+  scheduler_update_steps: 1
+
+misc:
+  max_eval_iter: 2  # Quick evaluation
+  max_eval_retry: 2
+  sharding_stage: zero0  # DDP mode
+  compiles_model: false
+  data_dump_on: false
+  cpu_only: false
+  peak_flops_per_sec: 312000000000000.0
+  monitors_dynamics: false  # Disable for testing
+
+model:
+  from_scratch: true
+  hiera:
+    # Segmentation-specific parameters - smaller for testing
+    num_classes: 2
+    decoder_embed_dim: 256  # Smaller for testing
+    decoder_depth: 2       # Shallow decoder for testing
+    decoder_num_heads: 8   # Fewer heads for testing
+    
+    # Smaller Hiera architecture for testing
+    input_size: [256, 256]  # Smaller input
+    in_chans: 1
+    embed_dim: 96          # Smaller embed dim
+    num_heads: 3            
+    stages: [1, 1, 3, 1]   # Fewer stages for testing
+    q_pool: 3
+    q_stride: [2, 2]
+    mask_unit_size: [8, 8]
+    mask_unit_attn: [true, true, false, false]
+    dim_mul: 2.0            
+    head_mul: 2.0           
+    patch_kernel: [7, 7]
+    patch_stride: [4, 4]
+    patch_padding: [3, 3]
+    mlp_ratio: 4.0
+    drop_path_rate: 0.0  # No dropout for testing
+    norm_layer: "LayerNorm"
+    head_dropout: 0.0
+    head_init_scale: 0.001
+    sep_pos_embed: false
+
+optim:
+  grad_clip: 1.0
+  lr: 1e-4
+  weight_decay: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  fused: false

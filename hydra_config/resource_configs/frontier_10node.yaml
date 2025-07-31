@@ -1,0 +1,19 @@
+# Frontier 10-node configuration (80 GPUs total)
+walltime: "02:00:00"  # 2 hours
+job: "frontier-10node-test"
+num_nodes: 10
+num_tasks: 80  # 10 nodes * 8 GPUs per node
+partition: batch
+qos: "normal"  # Use normal queue for production runs
+trainer: 'train_hiera_seg.py'
+yaml_config: 'frontier-10node-test.yaml'
+OMP_NUM_THREADS: 1
+transformers_cache: $HOME/.cache/huggingface
+num_gpus_per_node: 8  # 8 GCDs per node on Frontier
+num_cpus_per_task: 7  # 7 due to low-noise mode
+exclude_nodes: ""
+account: "mph121"  # Your account
+mail_user: "cwang31@slac.stanford.edu"  # Your email
+rocm_version: "6.2.4"
+nccl_debug: "INFO"
+core_spec_override: "0"  # Use all available cores

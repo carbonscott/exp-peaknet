@@ -1,0 +1,18 @@
+# Frontier single GPU test configuration for interactive node
+walltime: "00:30:00"  # Short run for testing
+job: "frontier-single-gpu-test"
+num_nodes: 1
+num_tasks: 1  # Single GPU test
+partition: batch
+qos: ""
+trainer: 'train_hiera_seg.py'
+yaml_config: 'single-gpu-test.yaml'
+OMP_NUM_THREADS: 1
+transformers_cache: $HOME/.cache/huggingface
+num_gpus_per_node: 1  # Using just 1 GPU for test
+num_cpus_per_task: 7  # 7 due to low-noise mode
+exclude_nodes: ""
+account: ""  # User must provide their ORNL project ID
+rocm_version: "6.2.4"
+nccl_debug: "INFO"
+core_spec_override: "0"
