@@ -232,6 +232,71 @@ export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export AMD_LOG_LEVEL=4
 ```
 
+## Critical Issue: Port 29500 Firewall Block
+
+**IMPORTANT**: Frontier's firewall blocks the default PyTorch distributed training port 29500, causing training to hang during NCCL initialization.
+
+### Symptoms
+- Training hangs after "Environment setup for distributed computation" messages
+- Socket connection errors: "Address family not supported by protocol"
+- Multi-node jobs get stuck at model setup phase for hours
+- NCCL initialization never completes
+
+### Root Cause
+Frontier blocks port 29500 used by PyTorch's default TCP store for distributed training coordination.
+
+### Solution: Use Alternative Port
+```bash
+# Instead of default port 29500, use an alternative port like 23456
+export MASTER_PORT=23456
+
+# For single-node multi-GPU training (recommended for debugging):
+srun --nodes=1 \
+     --ntasks=8 \
+     --ntasks-per-node=8 \
+     --cpus-per-task=7 \
+     --gpus-per-task=1 \
+     --gpu-bind=closest \
+     --export=ALL \
+     bash -c "
+export MASTER_ADDR=\$(hostname)
+export MASTER_PORT=23456
+export MPICH_GPU_SUPPORT_ENABLED=1
+export FI_MR_CACHE_MONITOR=memhooks
+export FI_CXI_RX_MATCH_MODE=software
+export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+export HIP_FORCE_DEV_KERNARG=1
+export ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export MIOPEN_USER_DB_PATH=/tmp/my-miopen-cache-\$USER
+export MIOPEN_CUSTOM_CACHE_DIR=\${MIOPEN_USER_DB_PATH}
+rm -rf \${MIOPEN_USER_DB_PATH}
+mkdir -p \${MIOPEN_USER_DB_PATH}
+export NCCL_DEBUG=INFO
+python train_hiera_seg.py your_config.yaml
+"
+```
+
+### Working Ports
+- ✅ **23456** - Confirmed working
+- ✅ **12345** - Alternative option
+- ✅ **0** - Auto-select free port (single node only)
+- ❌ **29500** - Blocked by Frontier firewall
+
+### Multi-Node Considerations
+For multi-node training, ensure the chosen port is:
+1. Not blocked by Frontier's firewall
+2. Available on all allocated nodes
+3. Consistently set across all ranks
+
+### Update SBATCH Templates
+Update your sbatch templates to use alternative ports:
+```bash
+# In your .sbatch file
+export MASTER_PORT=23456  # Instead of 29500
+```
+
+This issue affects all PyTorch distributed training on Frontier and is critical for multi-GPU setups.
+
 ## Best Practices
 
 1. **Always specify ROCR_VISIBLE_DEVICES** to control which GPUs are used
@@ -239,6 +304,7 @@ export AMD_LOG_LEVEL=4
 3. **Set OMP_NUM_THREADS=1** to avoid CPU oversubscription
 4. **Scale batch size with number of GPUs** for optimal throughput
 5. **Use NCCL for multi-GPU communication** (PyTorch default)
+6. **Use port 23456 instead of 29500** to avoid firewall issues
 
 ## Example: Full Training Command
 

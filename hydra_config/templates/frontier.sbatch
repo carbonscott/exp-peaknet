@@ -31,8 +31,8 @@ module load PrgEnv-amd
 module load rocm/{{ rocm_version }}
 module load cray-mpich
 
-# Set up environment for AMD GPUs
-export ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7  # All 8 GCDs per node
+# Set up environment for AMD GPUs - let SLURM handle GPU assignment
+# export ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7  # All 8 GCDs per node
 export MPICH_GPU_SUPPORT_ENABLED=1            # Enable GPU-aware MPI
 export FI_MR_CACHE_MONITOR=memhooks            # Recommended for GPU-aware MPI
 export FI_CXI_RX_MATCH_MODE=software           # Recommended for GPU-aware MPI
@@ -42,6 +42,10 @@ export PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb
 export HIP_FORCE_DEV_KERNARG=1
 export NCCL_DEBUG={{ nccl_debug }}
 export TORCH_NCCL_BLOCKING_WAIT=0
+
+# Fix "Address family not supported by protocol" errno 97 errors (critical for Frontier)
+export NCCL_SOCKET_FAMILY=AF_INET  # Force IPv4-only communication
+export NCCL_IB_DISABLE=1           # Disable InfiniBand if causing issues
 
 # Set up Huggingface cache
 export TRANSFORMERS_CACHE={{ transformers_cache }}
@@ -91,7 +95,7 @@ echo "Head node: $head_node"
 echo "Head node IP: $head_node_ip"
 
 export MASTER_ADDR=$head_node_ip
-export MASTER_PORT=29500
+export MASTER_PORT=23456
 
 # Log environment
 echo "SLURM_NTASKS: $SLURM_NTASKS"
