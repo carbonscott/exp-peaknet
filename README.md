@@ -8,7 +8,7 @@ A deep learning project for peak detection and analysis with multi-facility HPC 
 
 ```bash
 # Generate job scripts for ALL HPC facilities automatically
-python launch_unified.py job=my-experiment train_config=hiera resource_configs=hiera
+python launch_unified_hydra.py job=my-experiment train_config=hiera resource_configs=hiera
 
 # Submit to your current facility:
 sbatch experiments/jobs/my-experiment.s3df.sbatch      # SLAC S3DF
@@ -30,10 +30,11 @@ bsub experiments/jobs/my-experiment.summit.bsub        # ORNL Summit
 
 ## 🏗️ Job Launcher Comparison
 
-### 🆕 **NEW: Unified Launcher** (Recommended)
+### 🆕 **NEW: Hydra-Native Unified Launcher** (Recommended)
 ```bash
-python launch_unified.py job=my-job train_config=hiera resource_configs=hiera
+python launch_unified_hydra.py job=my-job train_config=hiera resource_configs=hiera
 ```
+- **Hydra-native**: Direct integration with Hydra configuration system
 - **One launcher for all facilities** (SLAC, NERSC, ORNL, etc.)
 - **Auto-generates scripts** for all supported facilities
 - **Future-proof**: Just add template files for new facilities
@@ -61,11 +62,12 @@ python launch_sbatch_job.py job=my-job sbatch_config=hiera train_config=hiera
 
 **New way:**
 ```bash
-python launch_unified.py job=my-job resource_configs=hiera train_config=hiera
+python launch_unified_hydra.py job=my-job resource_configs=hiera train_config=hiera
 ```
 
 **Key changes:**
 - `sbatch_config=hiera` → `resource_configs=hiera` (clearer naming)
+- Hydra-native launcher with direct config integration
 - Single launcher instead of facility-specific ones
 - All job scripts generated automatically
 
@@ -74,10 +76,10 @@ python launch_unified.py job=my-job resource_configs=hiera train_config=hiera
 ### Basic Training Job
 ```bash
 # Generate scripts for all facilities
-python launch_unified.py job=my-training train_config=base resource_configs=base
+python launch_unified_hydra.py job=my-training train_config=base resource_configs=base
 
 # Auto-submit to specific facility  
-python launch_unified.py job=my-training auto_submit=true target_facility=s3df
+python launch_unified_hydra.py job=my-training auto_submit=true target_facility=s3df
 ```
 
 ### Hiera Model Training
@@ -93,7 +95,19 @@ export GENERATE_ONLY=true
 ### Custom Resource Configuration
 ```bash
 # Create your own resource config in hydra_config/resource_configs/my_config.yaml
-python launch_unified.py job=my-job resource_configs=my_config train_config=hiera
+python launch_unified_hydra.py job=my-job resource_configs=my_config train_config=hiera
+```
+
+### Hiera-Huge Production Training
+```bash
+# Use the complete Hiera-Huge production configuration
+python launch_unified_hydra.py job=hiera-huge-production resource_configs=hiera train_config=hiera_huge
+```
+
+### Large-Scale Throughput Testing
+```bash
+# Test training throughput on 100 nodes (1000 GPUs)
+python launch_unified_hydra.py job=throughput-test resource_configs=throughput_100node train_config=throughput_test
 ```
 
 ## 🏛️ Supported HPC Facilities
@@ -169,7 +183,7 @@ A: Create new YAML files in `hydra_config/resource_configs/` and reference them 
 When adding support for new HPC facilities:
 1. Add template in `hydra_config/templates/`
 2. Add scheduler config in `hydra_config/scheduler_configs/`
-3. Test with `python launch_unified.py`
+3. Test with `python launch_unified_hydra.py`
 4. Update this README
 
 ## 📄 License
