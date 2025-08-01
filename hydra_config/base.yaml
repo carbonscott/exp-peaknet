@@ -6,6 +6,7 @@ defaults:
   - sbatch_config   : base      # DEPRECATED: Use launch_unified.py instead
   - resource_configs: base      # NEW: Resource specifications (compute requirements)
   - exp_mfu         : base
+  - experiment      : null      # NEW: Optional experiment configs
 
 auto_submit: false
 job: my_job
