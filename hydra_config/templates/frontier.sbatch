@@ -3,15 +3,11 @@
 # ORNL Frontier Supercomputer SLURM Template
 # 
 # CRITICAL DISTRIBUTED TRAINING CONFIGURATION:
-# This template uses --ntasks-per-node=1 --gpus-per-node=8 instead of 
-# --ntasks-per-node=8 --gpus-per-task=1 to avoid PyTorch DDP IndexError issues.
+# This template uses --ntasks-per-node=8 --gpus-per-node=8 for proper multi-GPU
+# distributed training on Frontier.
 #
-# WHY: With --gpus-per-task=1, each SLURM task only sees device 0, but PyTorch DDP
-# tries to initialize with device_ids=[local_rank] where local_rank can be 0-7.
-# This causes "IndexError: list index out of range" when local_rank > 0.
-#
-# SOLUTION: Use 1 task per node managing all 8 GPUs. This ensures all ranks have
-# local_rank=0, making DDP initialization work correctly with device_ids=[0].
+# IMPORTANT: The sbatch allocation must match the srun execution parameters
+# to avoid "More processors requested than permitted" errors.
 #
 # NETWORKING: Include NCCL_SOCKET_FAMILY=AF_INET to avoid IPv6 errno 97 warnings.
 #
@@ -22,7 +18,7 @@
 #SBATCH --time={{ walltime }}               # Walltime limit
 #SBATCH --job-name={{ job }}
 #SBATCH --nodes={{ num_nodes }}
-#SBATCH --ntasks-per-node=1                        # 1 task per node for proper DDP on Frontier
+#SBATCH --ntasks-per-node={{ num_gpus_per_node }}   # Match srun ntasks-per-node for consistent allocation
 #SBATCH --cpus-per-task={{ num_cpus_per_task }}    # 7 due to low-noise mode  
 #SBATCH --gpus-per-node={{ num_gpus_per_node }}    # 8 GPUs per node on Frontier
 #SBATCH --gpu-bind=closest
