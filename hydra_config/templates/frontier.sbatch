@@ -119,12 +119,17 @@ echo "Launch command: $LAUNCH_CMD"
 export LOGLEVEL=INFO
 
 # Launch distributed training with srun
-# CRITICAL: Use --ntasks={{ num_nodes }} (1 task per node) for proper DDP operation on Frontier
-# Each task manages all 8 GPUs on its node, avoiding IndexError in PyTorch DDP initialization
-# This is different from --ntasks-per-node=8 --gpus-per-task=1 which causes device index issues
-srun --ntasks={{ num_nodes }} \
-     --ntasks-per-node=1 \
+# Use --ntasks={{ num_tasks }} to get 1 rank per GPU (80 ranks for 80 GPUs)
+# Fix GPU visibility: each rank needs to see all GPUs but use the correct local_rank
+# Use --gpus-per-node instead of --gpus-per-task to avoid device visibility issues
+srun --ntasks={{ num_tasks }} \
+     --ntasks-per-node={{ num_gpus_per_node }} \
      --cpus-per-task={{ num_cpus_per_task }} \
      --gpus-per-node={{ num_gpus_per_node }} \
      --gpu-bind=closest \
-     bash -c "$LAUNCH_CMD"
+     bash -c "
+     # Set CUDA_VISIBLE_DEVICES to show all GPUs on this node
+     export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+     export ROCR_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+     $LAUNCH_CMD
+     "

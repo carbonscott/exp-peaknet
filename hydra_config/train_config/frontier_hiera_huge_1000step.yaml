@@ -1,0 +1,121 @@
+# Production Hiera-Huge 1000-step test configuration for Frontier
+# Based on hiera_huge.yaml with adjustments for 1000-step test run
+
+checkpoint:
+  state_dict_type: sharded
+  chkpt_saving_steps: 100      # Save every 100 steps for production tracking
+  preempt_chkpt_saving_steps: 50  # Save preempt checkpoints every 50 steps
+  directory: experiments/chkpts
+  prefix: frontier-hiera-huge-1000step
+  path_chkpt_prev: null  # Start from scratch
+  offload_to_cpu: false
+  rank0_only: false
+
+dataset:
+  drop_last_in_sampler: true
+  drop_last_in_loader: true
+  batch_size: 32  # Reduced from 40 as requested for the test
+  num_workers: 2
+  pin_memory: true
+  prefetch_factor: 4
+  seg_size: 100
+  path_train: pretrain/train.csv
+  path_eval: pretrain/eval.csv
+  debug: false
+  cache_size: 10
+  
+  # Cross-rank shuffling configuration - Production settings
+  enable_shuffling_train: true
+  enable_shuffling_eval: true
+  shuffle_seed_base: 42
+  reshuffle_frequency: 100
+  
+  transforms:
+    # Transform dimensions - Full production sizes
+    H_pad: 1920
+    W_pad: 1920
+    Hv: 512         # Full polar crop size
+    Wv: 512         # Full polar crop size
+    sigma: 0.33
+    num_crop: 1
+    
+    # Transform pipeline - Production settings
+    set:
+      pad: true
+      polar_center_crop: true
+      batch_sampler: false
+      random_patch: false
+      random_rotate: false
+      random_shift: false
+
+dist:
+  backend: nccl
+  uses_unique_world_seed: true
+  dtype: bfloat16        # Production precision
+  cpu_offload: null
+
+logging:
+  directory: experiments/logs
+  prefix: frontier-hiera-huge-1000step
+  level: INFO
+
+loss:
+  grad_accum_steps: 1
+  focal:
+    alpha: [0.25, 0.75]
+    gamma: 2.0
+
+lr_scheduler:
+  min_lr: 1.0e-07
+  total_steps: 1000          # 1000 steps for the test run
+  warmup_steps: 20           # 2% warmup (20/1000)
+  scheduler_update_steps: 1
+
+misc:
+  max_eval_iter: 10          # Reasonable evaluation iterations
+  max_eval_retry: 2
+  sharding_stage: zero0      # DDP mode for multi-node
+  compiles_model: false
+  data_dump_on: false
+  cpu_only: false
+  peak_flops_per_sec: 312000000000000.0
+  monitors_dynamics: true
+
+model:
+  from_scratch: true
+  hiera:
+    # Segmentation-specific parameters
+    num_classes: 2
+    decoder_embed_dim: 768    # Full production decoder
+    decoder_depth: 12         # Full production depth
+    decoder_num_heads: 24     # Full production heads
+    
+    # Hiera-Huge architecture parameters - PRODUCTION FULL MODEL
+    input_size: [512, 512]
+    in_chans: 1
+    embed_dim: 192            # Hiera-Huge embed dimension
+    num_heads: 3              # Hiera-Huge head count
+    stages: [2, 6, 48, 4]     # Hiera-Huge stage configuration (48 layers in stage 3!)
+    q_pool: 3
+    q_stride: [2, 2]
+    mask_unit_size: [16, 16]
+    mask_unit_attn: [true, true, false, false]
+    dim_mul: 2.0              # Hiera-Huge dimension multiplier
+    head_mul: 2.0             # Hiera-Huge head multiplier
+    patch_kernel: [7, 7]
+    patch_stride: [4, 4]
+    patch_padding: [3, 3]
+    mlp_ratio: 4.0
+    drop_path_rate: 0.1       # Production dropout
+    norm_layer: "LayerNorm"
+    head_dropout: 0.0
+    head_init_scale: 0.001
+    sep_pos_embed: false
+
+optim:
+  grad_clip: 1.0
+  lr: 0.0001      # Production learning rate
+  weight_decay: 1e-4
+  beta1: 0.9
+  beta2: 0.999
+  fused: false

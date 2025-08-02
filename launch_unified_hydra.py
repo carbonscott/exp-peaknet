@@ -133,38 +133,35 @@ def load_resource_config(resource_name, config_dir="hydra_config/resource_config
         return {}
 
 
-def build_hydra_command(cfg, base_trainer="train_hydra_demo.py"):
+def generate_yaml_config(cfg, job_name):
     """
-    BUILD HYDRA COMMAND INSTEAD OF YAML FILE
+    Generate YAML configuration file from Hydra config.
     
-    This is the key change! Instead of generating a YAML file,
-    we build a Hydra command with all the overrides.
+    This creates the YAML file that train_hiera_seg.py expects as input.
+    Only includes the train_config portion, not resource/scheduler configs.
     """
     
-    # Start with base command
-    cmd_parts = [f"python {base_trainer}"]
+    # Extract only the train_config portion
+    if hasattr(cfg, 'train_config') and cfg.train_config:
+        train_config_dict = OmegaConf.to_container(cfg.train_config, resolve=True)
+    else:
+        raise ValueError("No train_config found in configuration")
     
-    # Add all the overrides that would normally go in YAML
-    overrides = []
+    # Remove internal Hydra fields
+    train_config_dict.pop('_name', None)
     
-    # Job name
-    overrides.append(f"job={cfg.job}")
+    # Create YAML output directory
+    yaml_dir = "experiments/yaml"
+    os.makedirs(yaml_dir, exist_ok=True)
     
-    # Resource and train configs (these are the main config groups)
-    if hasattr(cfg, 'resource_configs') and hasattr(cfg.resource_configs, '_name'):
-        overrides.append(f"resource_configs={cfg.resource_configs._name}")
-    if hasattr(cfg, 'train_config') and hasattr(cfg.train_config, '_name'):
-        overrides.append(f"train_config={cfg.train_config._name}")
+    # Generate YAML file path
+    yaml_path = f"{yaml_dir}/{job_name}.yaml"
     
-    # Any other direct overrides from the launch command
-    # These would be things like checkpoint.path_chkpt_prev=path
-    # We can add these dynamically based on command line args
+    # Write YAML file
+    with open(yaml_path, 'w') as f:
+        yaml.safe_dump(train_config_dict, f, default_flow_style=False, sort_keys=False)
     
-    # Join all parts
-    if overrides:
-        cmd_parts.append(" ".join(overrides))
-    
-    return " ".join(cmd_parts)
+    return yaml_path
 
 
 def render_job_script(template_path, config_data):
@@ -198,11 +195,11 @@ def main(cfg: DictConfig):
     os.makedirs("experiments/jobs", exist_ok=True)
 
     # ----------------------------------------------------------------------- #
-    #  Build Hydra command instead of YAML file
+    #  Generate YAML configuration file
     # ----------------------------------------------------------------------- #
-    hydra_command = build_hydra_command(cfg, trainer)
-    print(f"🎯 Generated Hydra command:")
-    print(f"   {hydra_command}")
+    yaml_path = generate_yaml_config(cfg, job)
+    print(f"🎯 Generated YAML config:")
+    print(f"   {yaml_path}")
     print()
 
     # ----------------------------------------------------------------------- #
@@ -251,7 +248,7 @@ def main(cfg: DictConfig):
         # Add launcher-specific values
         merged_config.update({
             'job': job,
-            'hydra_command': hydra_command,  # NEW: Pass the Hydra command
+            'yaml_config': yaml_path,  # Pass the full YAML file path for job scripts
             'trainer': trainer
         })
 
@@ -282,7 +279,7 @@ def main(cfg: DictConfig):
     for script in generated_scripts:
         print(f"   {script}")
 
-    print(f"\n🎯 Each script runs: {hydra_command}")
+    print(f"\n🎯 Each script uses config: {yaml_path}")
 
     # Handle auto-submission (same logic as before)
     if cfg.get('auto_submit', False):
