@@ -44,8 +44,75 @@ def discover_templates(template_dir="hydra_config/templates"):
     return facilities
 
 
+def get_facility_config(cfg: DictConfig, facility: str):
+    """
+    Get facility-specific configuration using Hydra's native merging.
+    
+    This replaces the manual config loading and merging with Hydra's
+    built-in configuration composition and override system.
+    
+    Priority order (highest to lowest):
+    1. CLI overrides and resource_configs (cfg) 
+    2. Scheduler configs (facility defaults)
+    """
+    
+    # Load facility-specific scheduler config first (lower priority)
+    scheduler_config_path = f"hydra_config/scheduler_configs/{facility}.yaml"
+    if os.path.exists(scheduler_config_path):
+        scheduler_cfg = OmegaConf.load(scheduler_config_path)
+    else:
+        print(f"Warning: No scheduler config found for {facility}")
+        scheduler_cfg = OmegaConf.create({})
+    
+    # Start with scheduler defaults
+    facility_config = scheduler_cfg.copy()
+    
+    # Flatten resource_configs into top-level (higher priority)
+    if hasattr(cfg, 'resource_configs') and cfg.resource_configs:
+        resource_flat = OmegaConf.to_container(cfg.resource_configs, resolve=True)
+        # Remove internal Hydra fields
+        if '_name' in resource_flat:
+            del resource_flat['_name']
+        facility_config.update(resource_flat)
+    
+    # Apply any other top-level overrides from cfg (highest priority)
+    cfg_flat = OmegaConf.to_container(cfg, resolve=True)
+    for key, value in cfg_flat.items():
+        if key != 'resource_configs':  # Don't overwrite our flattened resource_configs
+            facility_config[key] = value
+    
+    return OmegaConf.create(facility_config)
+
+
+def validate_config(config_dict, facility):
+    """Validate critical configuration parameters"""
+    warnings = []
+    errors = []
+    
+    # Check required fields
+    if config_dict.get('num_nodes', 0) <= 0:
+        errors.append(f"num_nodes must be > 0, got: {config_dict.get('num_nodes')}")
+    
+    if config_dict.get('num_tasks', 0) <= 0:
+        errors.append(f"num_tasks must be > 0, got: {config_dict.get('num_tasks')}")
+    
+    # Facility-specific validations
+    if facility == 'frontier' and config_dict.get('num_nodes', 0) > 0:
+        num_tasks = config_dict.get('num_tasks', 0)
+        num_nodes = config_dict.get('num_nodes', 1)
+        
+        if num_tasks % num_nodes != 0:
+            warnings.append(f"Frontier: num_tasks ({num_tasks}) should be divisible by num_nodes ({num_nodes})")
+        
+        if num_tasks // num_nodes > 8:
+            warnings.append(f"Frontier: More than 8 tasks per node may exceed GPU capacity")
+    
+    return warnings, errors
+
+
+# DEPRECATED: Keep for backward compatibility if needed
 def load_scheduler_config(facility, config_dir="hydra_config/scheduler_configs"):
-    """Load facility-specific scheduler configuration"""
+    """DEPRECATED: Load facility-specific scheduler configuration"""
     config_path = f"{config_dir}/{facility}.yaml"
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
@@ -56,7 +123,7 @@ def load_scheduler_config(facility, config_dir="hydra_config/scheduler_configs")
 
 
 def load_resource_config(resource_name, config_dir="hydra_config/resource_configs"):
-    """Load resource-specific configuration"""
+    """DEPRECATED: Load resource-specific configuration"""
     config_path = f"{config_dir}/{resource_name}.yaml"
     if os.path.exists(config_path):
         with open(config_path, 'r') as f:
@@ -161,20 +228,27 @@ def main(cfg: DictConfig):
 
         print(f"🏗️  Generating {facility} job script...")
 
-        # Load facility configs (same as before)
-        scheduler_config = load_scheduler_config(facility)
+        # Get facility-specific config using proper Hydra merging
+        facility_config = get_facility_config(cfg, facility)
         
-        resource_name = 'base'
-        if hasattr(cfg, 'resource_configs') and hasattr(cfg.resource_configs, '_name'):
-            resource_name = cfg.resource_configs._name
-        resource_config = load_resource_config(resource_name)
-
-        # Merge configs
-        merged_config = {}
-        merged_config.update(resource_config)
-        merged_config.update(scheduler_config)
-
-        # THE KEY CHANGE: Pass Hydra command instead of YAML path
+        # Convert OmegaConf to dict for Jinja template compatibility
+        merged_config = OmegaConf.to_container(facility_config, resolve=True)
+        
+        # Validate configuration
+        warnings, errors = validate_config(merged_config, facility)
+        
+        if errors:
+            print(f"   ❌ Configuration errors for {facility}:")
+            for error in errors:
+                print(f"      - {error}")
+            continue  # Skip this facility
+        
+        if warnings:
+            print(f"   ⚠️  Configuration warnings for {facility}:")
+            for warning in warnings:
+                print(f"      - {warning}")
+        
+        # Add launcher-specific values
         merged_config.update({
             'job': job,
             'hydra_command': hydra_command,  # NEW: Pass the Hydra command

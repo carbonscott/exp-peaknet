@@ -1,4 +1,20 @@
 #!/bin/bash
+#
+# ORNL Frontier Supercomputer SLURM Template
+# 
+# CRITICAL DISTRIBUTED TRAINING CONFIGURATION:
+# This template uses --ntasks-per-node=1 --gpus-per-node=8 instead of 
+# --ntasks-per-node=8 --gpus-per-task=1 to avoid PyTorch DDP IndexError issues.
+#
+# WHY: With --gpus-per-task=1, each SLURM task only sees device 0, but PyTorch DDP
+# tries to initialize with device_ids=[local_rank] where local_rank can be 0-7.
+# This causes "IndexError: list index out of range" when local_rank > 0.
+#
+# SOLUTION: Use 1 task per node managing all 8 GPUs. This ensures all ranks have
+# local_rank=0, making DDP initialization work correctly with device_ids=[0].
+#
+# NETWORKING: Include NCCL_SOCKET_FAMILY=AF_INET to avoid IPv6 errno 97 warnings.
+#
 #SBATCH --output=slurm/{{ job }}.%j.log    # File to which STDOUT will be written, %j inserts jobid
 #SBATCH --error=slurm/{{ job }}.%j.err     # File to which STDERR will be written, %j inserts jobid
 #SBATCH --account={{ account }}             # Your ORNL project ID
@@ -6,9 +22,9 @@
 #SBATCH --time={{ walltime }}               # Walltime limit
 #SBATCH --job-name={{ job }}
 #SBATCH --nodes={{ num_nodes }}
-#SBATCH --ntasks-per-node={{ num_gpus_per_node }}  # 8 for Frontier (one task per GCD)
-#SBATCH --cpus-per-task={{ num_cpus_per_task }}    # 7 due to low-noise mode
-#SBATCH --gpus-per-task=1
+#SBATCH --ntasks-per-node=1                        # 1 task per node for proper DDP on Frontier
+#SBATCH --cpus-per-task={{ num_cpus_per_task }}    # 7 due to low-noise mode  
+#SBATCH --gpus-per-node={{ num_gpus_per_node }}    # 8 GPUs per node on Frontier
 #SBATCH --gpu-bind=closest
 {%- if exclude_nodes %}
 #SBATCH --exclude={{ exclude_nodes }}
@@ -103,9 +119,12 @@ echo "Launch command: $LAUNCH_CMD"
 export LOGLEVEL=INFO
 
 # Launch distributed training with srun
-srun --ntasks=$SLURM_NTASKS \
-     --ntasks-per-node={{ num_gpus_per_node }} \
+# CRITICAL: Use --ntasks={{ num_nodes }} (1 task per node) for proper DDP operation on Frontier
+# Each task manages all 8 GPUs on its node, avoiding IndexError in PyTorch DDP initialization
+# This is different from --ntasks-per-node=8 --gpus-per-task=1 which causes device index issues
+srun --ntasks={{ num_nodes }} \
+     --ntasks-per-node=1 \
      --cpus-per-task={{ num_cpus_per_task }} \
-     --gpus-per-task=1 \
+     --gpus-per-node={{ num_gpus_per_node }} \
      --gpu-bind=closest \
      bash -c "$LAUNCH_CMD"

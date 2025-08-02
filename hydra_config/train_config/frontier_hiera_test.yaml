@@ -13,7 +13,7 @@ checkpoint:
 dataset:
   drop_last_in_sampler: true
   drop_last_in_loader: true
-  batch_size: 2  # Small batch for testing
+  batch_size: 64  # Optimal batch size for 80 GPUs
   num_workers: 2
   pin_memory: true
   prefetch_factor: 2
@@ -64,7 +64,7 @@ loss:
 
 lr_scheduler:
   min_lr: 1.0e-07
-  total_steps: 50  # Very short for testing
+  total_steps: 50  # Extended test for throughput measurement
   warmup_steps: 5
   scheduler_update_steps: 1
 

@@ -1,4 +1,5 @@
 # Frontier 10-node configuration (80 GPUs total)
+# @package _global_
 walltime: "02:00:00"  # 2 hours
 job: "frontier-10node-test"
 num_nodes: 10

@@ -2,6 +2,39 @@
 
 This guide covers how to run the PeakNet training code on Frontier's interactive nodes, both in single-rank and multi-rank configurations.
 
+## ⚠️ CRITICAL: Distributed Training Configuration
+
+### **MUST USE: 1 Task Per Node Approach**
+
+For multi-node distributed training on Frontier, you **MUST** use:
+
+**✅ CORRECT:**
+```bash
+srun --ntasks=10 --ntasks-per-node=1 --gpus-per-node=8
+```
+
+**❌ INCORRECT (causes IndexError):**
+```bash
+srun --ntasks=80 --ntasks-per-node=8 --gpus-per-task=1
+```
+
+### **Why This Matters**
+
+The incorrect approach causes PyTorch DDP to fail with:
+```
+IndexError: list index out of range
+  File "torch/nn/parallel/_functions.py", line 132, in _get_stream
+    if _streams[device.index] is None:
+```
+
+**Root Cause**: With `--gpus-per-task=1`, each SLURM task only sees device 0, but PyTorch DDP tries to initialize with `device_ids=[local_rank]` where `local_rank` can be 1-7.
+
+**Solution**: Use 1 task per node managing all 8 GPUs. This ensures all ranks have `local_rank=0`, making DDP work correctly.
+
+### **Template Updated**
+
+The `hydra_config/templates/frontier.sbatch` template has been updated to use the correct configuration.
+
 ## Prerequisites
 
 ### 1. Request an Interactive Node
