@@ -781,6 +781,9 @@ try:
             # Increment step counter only after parameter update
             step_counter += 1
 
+            # [PROGRESS] Advance dataset progress sequentially  
+            dataset_train.advance_progress(batch_size)
+
             # [SHUFFLE] Trigger reshuffling if needed
             dataset_train.maybe_reshuffle(step_counter)
 
